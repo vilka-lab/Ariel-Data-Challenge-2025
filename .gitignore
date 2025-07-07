@@ -1,1 +1,5 @@
 ariel-data-challenge-2025
+tmp
+*.ipynb
+*.pyc
+*.npy
