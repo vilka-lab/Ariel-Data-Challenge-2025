@@ -78,7 +78,7 @@ class SensorData:
             engine="pyarrow",
         ).values.astype(np.float64).reshape(sensor_sizes_dict[self.sensor][0])
 
-    def adc_convert(self) -> None:
+    def apply_adc_convert(self) -> None:
         if self.adc_converted:
             return
         
@@ -86,7 +86,7 @@ class SensorData:
         self.signal += self.offset
         self.adc_converted = True
 
-    def mask_hot_dead(self) -> None:
+    def apply_mask_hot_dead(self) -> None:
         if self.mask_hot_dead_converted:
             return
         
@@ -113,7 +113,7 @@ class SensorData:
 
         self.linear_corr_converted = True
 
-    def clean_dark(self) -> None:
+    def apply_clean_dark(self) -> None:
         if self.clean_dark_converted:
             return
         
@@ -129,20 +129,35 @@ class SensorData:
         self.signal = np.subtract(self.signal[1::2, :, :], self.signal[::2, :, :])
         self.cds_converted = True
 
-    def correct_flat_field(self) -> None:
+    def apply_correct_flat_field(self) -> None:
         if self.flat_field_converted:
             return
         
         self.signal = self.signal / self.flat_frame
         self.flat_field_converted = True
 
-    def clean_read(self) -> None:
+    def apply_clean_read(self) -> None:
         if self.read_converted:
             return
         
         read = np.tile(self.read_frame * 2, (self.signal.shape[0], 1, 1))
         self.signal -= read
         self.read_converted = True
+
+    def fill_nan(self) -> None:
+        self.signal = np.nan_to_num(self.signal)
+
+    def process(self) -> None:
+        self.apply_adc_convert()
+        self.apply_mask_hot_dead()
+        self.apply_linear_corr()
+
+        self.apply_clean_dark()
+        self.apply_clean_read()
+
+        self.apply_cds()
+        self.apply_correct_flat_field()
+        self.fill_nan()
 
    
 
