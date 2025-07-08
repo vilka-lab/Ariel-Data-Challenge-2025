@@ -12,6 +12,69 @@ sensor_sizes_dict = {
     "FGS1": [[135000, 32, 32], [32, 32]],
 }
 
+SIGMA = 60
+
+def dgauss(sig):
+    xs = np.arange(-3.*sig, 3.*sig+1)
+    den = 2.*sig*sig
+    ys = np.exp(-np.square(xs)/den)
+    dys = -2*xs/den*ys
+    return dys
+
+def d2gauss(sig):
+    xs = np.arange(-3.*sig, 3.*sig+1)
+    den = 2.*sig*sig
+    ys = np.exp(-np.square(xs)/den)
+    d2ys = np.square(2/den)*ys*(xs-sig)*(xs+sig)
+    return d2ys
+
+def find_transit_edges(S, sigma):
+    """ Find the centers of the transitions """
+
+    Sc = np.convolve(S, dgauss(sigma), mode="valid")
+    off = int((S.size-Sc.size)/2)
+    mid = Sc.size//2
+    
+    transit_start = np.argmin(Sc[3:mid-3])+off+3
+    transit_end = np.argmax(Sc[mid+3:-3])+off+mid+3
+
+    return transit_start, transit_end
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+def find_transit_slopes(S, transit_start, transit_end, sigma):
+    """find the width of the transitions"""
+    
+    Sc2 = np.convolve(S, d2gauss(sigma), mode="valid")
+    off = int((S.size-Sc2.size)/2)
+
+    t1 = transit_start - off
+    t2 = transit_end - off
+    
+    sz = 2*sigma
+
+    try:
+        t1a = np.argmin(Sc2[t1-sz:t1+1])+t1-sz+off
+    except Exception:
+        t1a = None
+
+    try:
+        t1b = np.argmax(Sc2[t1:t1+sz+1])+t1+off
+    except Exception:
+        t1b = None
+
+    try:
+        t2a = np.argmax(Sc2[t2-sz:t2+1])+t2-sz+off
+    except Exception:
+        t2a = None
+
+    try:
+        t2b = np.argmin(Sc2[t2:t2+sz+1])+t2+off
+    except Exception:
+        t2b = None
+
+    return t1a, t1b, t2a, t2b
+
 
 
 class SensorData:
@@ -37,6 +100,7 @@ class SensorData:
         self.transit_num = transit_num
         self.gain = 0.4369
         self.offset = -1000.0
+        self.edges = {}
         
         self.signal = self._read_signal()
         self.calibration_folder = f"{sensor}_calibration_{transit_num}"
@@ -163,6 +227,7 @@ class SensorData:
         self.apply_clean_read()
 
         self.apply_cds()
+        self.find_edges()
         self.bin_obs(self.bin_coef)
 
         self.apply_correct_flat_field()
@@ -178,20 +243,57 @@ class SensorData:
             cds_binned[:,i,:,:] = np.sum(cds_transposed[:,i*binning:(i+1)*binning,:,:], axis=1)
         
         self.signal = cds_binned.transpose(0,1,3,2)[0]
+
+        for k, v in self.edges.items():
+            self.edges[k] = v // binning if v else None
         self.binned = True
 
     def plot_raw(self, time: int) -> plt.Figure:
         fig, ax = plt.subplots(1, 1, figsize=(10, 5))
         ax.imshow(self.signal[time], aspect="auto")
+        ax.set_title(f"Planet {self.planet_id} {self.sensor} {time = }")
         return fig
     
     def plot_curve(self) -> plt.Figure:
         fig, ax = plt.subplots(1, 1, figsize=(10, 5))
 
         light_curve = np.nan_to_num(self.signal).sum(axis=(1,2))
-        ax.plot(light_curve/light_curve.mean(), '-', alpha=0.3)
+        ax.plot(light_curve/light_curve.mean(), '-')
+
+        # plot edges
+        if self.edges:
+            ax.axvline(self.edges["transit_start"], color="g", alpha=0.5)
+            ax.axvline(self.edges["transit_end"], color="g", alpha=0.5)
+            if self.edges["t1a"]:
+                ax.axvline(self.edges["t1a"], color='blue')
+
+            if self.edges["t1b"]:
+                ax.axvline(self.edges["t1b"], color='blue')
+
+            if self.edges["t2a"]:
+                ax.axvline(self.edges["t2a"], color='blue')
+
+            if self.edges["t2b"]:
+                ax.axvline(self.edges["t2b"], color='blue')
         
+        ax.set_title(f"Light curve for planet {self.planet_id} {self.sensor}")
         return fig
+    
+    def find_edges(self) -> None:
+        light_curve = np.nan_to_num(self.signal).sum(axis=(1,2))
+        light_curve = light_curve / light_curve.mean()
+
+        transit_start, transit_end = find_transit_edges(light_curve, sigma=SIGMA)
+        t1a, t1b, t2a, t2b = find_transit_slopes(light_curve, transit_start, transit_end, sigma=60)
+
+        self.edges = {
+            "transit_start": transit_start,
+            "transit_end": transit_end,
+            "t1a": t1a,
+            "t1b": t1b,
+            "t2a": t2a,
+            "t2b": t2b
+        }
 
    
 
@@ -200,7 +302,9 @@ class TransitData:
         self.airs = SensorData(path, planet_id, "AIRS-CH0", transit_num, axis_info=axis_info)
         self.fgs = SensorData(path, planet_id, "FGS1", transit_num)
         
-
+    def process(self) -> None:
+        self.airs.process()
+        self.fgs.process()
 
 class DataProcessor:
     def __init__(self, path: str) -> None:
