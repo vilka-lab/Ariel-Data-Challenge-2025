@@ -4,6 +4,7 @@ import itertools
 import pandas as pd
 import numpy as np
 from astropy.stats import sigma_clip
+import matplotlib.pyplot as plt
 
 
 sensor_sizes_dict = {
@@ -24,6 +25,11 @@ class SensorData:
             ) -> None:
         if sensor not in ["AIRS-CH0", "FGS1"]:
             raise ValueError("Invalid sensor")
+        
+        if sensor == "AIRS-CH0":
+            self.bin_coef = 30
+        else:
+            self.bin_coef = 360
         
         self.path = Path(path)
         self.sensor = sensor
@@ -50,6 +56,7 @@ class SensorData:
         self.cds_converted = False
         self.flat_field_converted = False
         self.read_converted = False
+        self.binned = False
 
     def _construct_dt(self, axis_info: pd.DataFrame | None = None) -> None:
         if self.sensor == "AIRS-CH0":
@@ -156,8 +163,35 @@ class SensorData:
         self.apply_clean_read()
 
         self.apply_cds()
+        self.bin_obs(self.bin_coef)
+
         self.apply_correct_flat_field()
         self.fill_nan()
+
+    def bin_obs(self, binning: int) -> None:
+        if self.binned:
+            return
+        
+        cds_transposed = self.signal[None, ...].transpose(0,1,3,2)
+        cds_binned = np.zeros((cds_transposed.shape[0], cds_transposed.shape[1]//binning, cds_transposed.shape[2], cds_transposed.shape[3]))
+        for i in range(cds_transposed.shape[1]//binning):
+            cds_binned[:,i,:,:] = np.sum(cds_transposed[:,i*binning:(i+1)*binning,:,:], axis=1)
+        
+        self.signal = cds_binned.transpose(0,1,3,2)[0]
+        self.binned = True
+
+    def plot_raw(self, time: int) -> plt.Figure:
+        fig, ax = plt.subplots(1, 1, figsize=(10, 5))
+        ax.imshow(self.signal[time], aspect="auto")
+        return fig
+    
+    def plot_curve(self) -> plt.Figure:
+        fig, ax = plt.subplots(1, 1, figsize=(10, 5))
+
+        light_curve = np.nan_to_num(self.signal).sum(axis=(1,2))
+        ax.plot(light_curve/light_curve.mean(), '-', alpha=0.3)
+        
+        return fig
 
    
 
