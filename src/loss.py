@@ -40,4 +40,4 @@ class GaussianLogLikelihoodLoss(torch.nn.Module):
         total_weight = weights.sum()
         loss = weighted_sum / total_weight
         
-        return loss
+        return -loss
