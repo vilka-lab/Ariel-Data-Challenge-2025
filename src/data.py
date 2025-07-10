@@ -5,6 +5,8 @@ import pandas as pd
 import numpy as np
 from astropy.stats import sigma_clip
 import matplotlib.pyplot as plt
+from tqdm import tqdm
+import joblib
 
 
 sensor_sizes_dict = {
@@ -81,9 +83,9 @@ class SensorData:
     def __init__(
             self, 
             path: Path | str, 
-            planet_id: int, 
+            planet_id: int | str, 
             sensor: str, 
-            transit_num: int,
+            transit_num: int | str,
             axis_info: pd.DataFrame | None = None
             ) -> None:
         if sensor not in ["AIRS-CH0", "FGS1"]:
@@ -231,7 +233,7 @@ class SensorData:
         self.bin_obs(self.bin_coef)
 
         self.apply_correct_flat_field()
-        self.fill_nan()
+        # self.fill_nan()
 
     def bin_obs(self, binning: int) -> None:
         if self.binned:
@@ -299,6 +301,8 @@ class SensorData:
 
 class TransitData:
     def __init__(self, path: Path, planet_id: int, transit_num: int, axis_info: pd.DataFrame) -> None:
+        self.planet_id = planet_id
+        self.transit_num = transit_num
         self.airs = SensorData(path, planet_id, "AIRS-CH0", transit_num, axis_info=axis_info)
         self.fgs = SensorData(path, planet_id, "FGS1", transit_num)
         
@@ -307,8 +311,83 @@ class TransitData:
         self.fgs.process()
 
 class DataProcessor:
-    def __init__(self, path: str) -> None:
-        self.path = path
-        self.files = list(Path(path).glob("*"))
+    def __init__(self, planets: list[Path], axis_info: pd.DataFrame) -> None:
+        self.planets = planets
+        self.axis_info = axis_info
+
+        self.process()
+
+    def process(self) -> None:
+        self.data = []
+
+        for planet_path in self.planets:
+            files = planet_path.glob('*.parquet')
+            num_transits = len(list(files)) // 2
+
+            for i in range(num_transits):
+                row = {
+                    'path': planet_path.parent,
+                    'planet_id': planet_path.name,
+                    'num_transit': i
+                }
+                self.data.append(row)
+
+    def __len__(self) -> int:
+        return len(self.data)
+    
+    def __getitem__(self, index: int) -> TransitData:
+        row = self.data[index]
+        path = row['path']
+        planet_id = row['planet_id']
+        transit_num = row['num_transit']
+
+        return TransitData(path, planet_id, transit_num, self.axis_info)
+    
+    def save(self, path: Path | str, plots: bool = False) -> None:    
+        folder = Path(path)
+        object_folder = folder / "objects"
+        object_folder.mkdir(parents=True, exist_ok=True)
+
+        if plots:
+            import matplotlib.pyplot as plt
+            import matplotlib
+            matplotlib.use('Agg')
+            plt.style.use('ggplot')
+
+            plots_folder = folder / "plots"
+
+            airs_raw_plot_folder = plots_folder / "airs_raw_plots"
+            airs_curve_plot_folder = plots_folder / "airs_curve_plots"
+
+            fgs_raw_plot_folder = plots_folder / "fgs_raw_plots"
+            fgs_curve_plot_folder = plots_folder / "fgs_curve_plots"
+
+            plots_folder.mkdir(parents=True, exist_ok=True)
+            airs_raw_plot_folder.mkdir(parents=True, exist_ok=True)
+            airs_curve_plot_folder.mkdir(parents=True, exist_ok=True)
+            fgs_raw_plot_folder.mkdir(parents=True, exist_ok=True)
+            fgs_curve_plot_folder.mkdir(parents=True, exist_ok=True)
+
+
+        for i, d in tqdm(enumerate(self), desc="Processing data", total=len(self)):
+            try:
+                d.process()
+                name = f"{d.planet_id}_{d.transit_num}"
+                joblib.dump(d, object_folder / f"{name}.joblib")
+
+                raw = d.airs.plot_raw(10)
+                raw.savefig(airs_raw_plot_folder / f"{name}.png", bbox_inches="tight")
+
+                curve = d.airs.plot_curve()
+                curve.savefig(airs_curve_plot_folder / f"{name}.png", bbox_inches="tight")
+
+                raw = d.fgs.plot_raw(10)
+                raw.savefig(fgs_raw_plot_folder / f"{name}.png", bbox_inches="tight")
+
+                curve = d.fgs.plot_curve()
+                curve.savefig(fgs_curve_plot_folder / f"{name}.png", bbox_inches="tight")
+            except Exception as e:
+                print(f"error in object {i}", e)
+                continue
 
     
