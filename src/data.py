@@ -255,7 +255,7 @@ class SensorData:
             self.edges[k] = v // binning if v else None
         self.binned = True
 
-    def plot_raw(self, time: int) -> plt.Figure:
+    def plot_raw(self, time: int = 0) -> plt.Figure:
         fig, ax = plt.subplots(1, 1, figsize=(10, 5))
         ax.imshow(self.signal[time], aspect="auto")
         ax.set_title(f"Planet {self.planet_id} {self.sensor} {time = }")
@@ -387,26 +387,27 @@ class DataProcessor:
             fgs_raw_plot_folder.mkdir(parents=True, exist_ok=True)
             fgs_curve_plot_folder.mkdir(parents=True, exist_ok=True)
 
-
         for i, d in tqdm(enumerate(self), desc="Processing data", total=len(self)):
             try:
                 d.process()
                 name = f"{d.planet_id}_{d.transit_num}"
                 joblib.dump(d, object_folder / f"{name}.joblib")
 
-                raw = d.airs.plot_raw(10)
-                raw.savefig(airs_raw_plot_folder / f"{name}.png", bbox_inches="tight")
+                if plots:
+                    plot_rules = [
+                        (d.airs.plot_raw, airs_raw_plot_folder),
+                        (d.airs.plot_curve, airs_curve_plot_folder),
+                        (d.fgs.plot_raw, fgs_raw_plot_folder),
+                        (d.fgs.plot_curve, fgs_curve_plot_folder)
+                    ]
 
-                curve = d.airs.plot_curve()
-                curve.savefig(airs_curve_plot_folder / f"{name}.png", bbox_inches="tight")
+                    for f_, save_folder in plot_rules:
+                        fig = f_()
+                        fig.savefig(save_folder / f"{name}.png", bbox_inches="tight")
+                        plt.close(fig)
 
-                raw = d.fgs.plot_raw(10)
-                raw.savefig(fgs_raw_plot_folder / f"{name}.png", bbox_inches="tight")
-
-                curve = d.fgs.plot_curve()
-                curve.savefig(fgs_curve_plot_folder / f"{name}.png", bbox_inches="tight")
             except Exception as e:
-                print(f"error in object {i}", e)
+                print(f"error in object {i} {d.planet_id = }", e)
                 continue
 
     
