@@ -229,7 +229,12 @@ class SensorData:
         self.apply_clean_read()
 
         self.apply_cds()
-        self.find_edges()
+
+        if self.sensor == "AIRS-CH0":
+            self.find_edges()
+        else:
+            self.set_edges(None)
+
         self.bin_obs(self.bin_coef)
 
         self.apply_correct_flat_field()
@@ -286,7 +291,7 @@ class SensorData:
         light_curve = light_curve / light_curve.mean()
 
         transit_start, transit_end = find_transit_edges(light_curve, sigma=SIGMA)
-        t1a, t1b, t2a, t2b = find_transit_slopes(light_curve, transit_start, transit_end, sigma=60)
+        t1a, t1b, t2a, t2b = find_transit_slopes(light_curve, transit_start, transit_end, sigma=SIGMA)
 
         self.edges = {
             "transit_start": transit_start,
@@ -297,6 +302,18 @@ class SensorData:
             "t2b": t2b
         }
 
+    def set_edges(self, edges: dict | None) -> None:
+        if edges:
+            self.edges = edges
+        else:
+            self.edges = {
+                "transit_start": None,
+                "transit_end": None,
+                "t1a": None,
+                "t1b": None,
+                "t2a": None,
+                "t2b": None
+            }
    
 
 class TransitData:
@@ -309,6 +326,8 @@ class TransitData:
     def process(self) -> None:
         self.airs.process()
         self.fgs.process()
+
+        self.fgs.set_edges(self.airs.edges)
 
 class DataProcessor:
     def __init__(self, planets: list[Path], axis_info: pd.DataFrame) -> None:
