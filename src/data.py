@@ -7,6 +7,9 @@ from astropy.stats import sigma_clip
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import joblib
+from torch.utils.data import Dataset, DataLoader
+import lightning as L
+import torch
 
 
 sensor_sizes_dict = {
@@ -423,4 +426,77 @@ class DataProcessor:
                 print(f"error in object {i} {d.planet_id = }", e)
                 continue
 
+STATS = {
+    "AIRS-CH0": [-504, 2485],
+    "FGS1": [-1297, 15787]
+}
     
+class TransitTrainDataset(Dataset):
+    def __init__(self, data_processor: DataProcessor, gt: pd.DataFrame) -> None:
+        self.data_processor = data_processor
+        self.gt = gt.set_index("planet_id").to_dict("index")
+
+    def __len__(self) -> int:
+        return len(self.data_processor)
+    
+    def _process(self, a: np.ndarray, b: np.ndarray, sensor: str) -> np.ndarray:
+        diff = torch.from_numpy(np.nan_to_num(a - b))
+        mean, std = STATS[sensor]
+        return (diff - mean) / std
+
+    def __getitem__(self, index: int) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+        obj = self.data_processor[index]
+        edges = obj.airs.edges
+        left_border = edges["t1a"] or edges["transit_start"] or edges["t1b"]
+        right_border = edges["t2b"] or edges["transit_end"] or edges["t2a"]
+        
+        max_index = obj.airs.signal.shape[0]
+        
+        if np.random.rand() < 0.5:
+            high_index = np.random.randint(0, left_border)
+        else:
+            high_index = np.random.randint(right_border, max_index)
+
+        
+        low_index = np.random.randint(left_border, right_border)
+
+        X = {
+            "airs": self._process(obj.airs.signal[low_index], obj.airs.signal[high_index], "AIRS-CH0"),
+            "fgs": self._process(obj.fgs.signal[low_index], obj.fgs.signal[high_index], "FGS1")
+        }
+        
+        planet_id = int(obj.planet_id)
+        y = torch.tensor([self.gt[planet_id][f"wl_{i}"] for i in range(1, 284)])
+
+        return X, y
+    
+
+class TransitTestDataset(TransitTrainDataset):
+    def __getitem__(self, index: int) -> tuple[dict[str, torch.Tensor], torch.Tensor, int]:
+        obj = self.data_processor[index]
+        edges = obj.airs.edges
+        left_border = edges["t1a"] or edges["transit_start"] or edges["t1b"]
+        right_border = edges["t2b"] or edges["transit_end"] or edges["t2a"]
+        
+        max_index = obj.airs.signal.shape[0]
+
+        high_index_left = (0 + left_border) // 2
+        high_index_right = (right_border + max_index) // 2
+
+        low_index = (left_border + right_border) // 2
+        
+        X = {
+            "airs": torch.stack([
+                self._process(obj.airs.signal[high_index_left], obj.airs.signal[low_index], "AIRS-CH0"),
+                self._process(obj.airs.signal[high_index_right], obj.airs.signal[low_index], "AIRS-CH0")
+            ]),
+            "fgs": torch.stack([
+                self._process(obj.fgs.signal[high_index_left], obj.fgs.signal[low_index], "FGS1"),
+                self._process(obj.fgs.signal[high_index_right], obj.fgs.signal[low_index], "FGS1")
+            ])
+        }
+
+        planet_id = int(obj.planet_id)
+        y = torch.tensor([self.gt[planet_id][f"wl_{i}"] for i in range(1, 284)])
+
+        return X, y, planet_id
