@@ -330,9 +330,11 @@ class TransitData:
         self.fgs.set_edges(self.airs.edges)
 
 class DataProcessor:
-    def __init__(self, planets: list[Path], axis_info: pd.DataFrame) -> None:
+    def __init__(self, planets: list[Path], axis_info: pd.DataFrame, cache_folder: str | None = None) -> None:
         self.planets = planets
         self.axis_info = axis_info
+        self.cache_folder = Path(cache_folder) / "objects"
+        self.cache_folder.mkdir(parents=True, exist_ok=True)
 
         self.process()
 
@@ -356,12 +358,23 @@ class DataProcessor:
     
     def __getitem__(self, index: int) -> TransitData:
         row = self.data[index]
+
+        if self.cache_folder:
+            cache_file = self.cache_folder / f"{row['planet_id']}_{row['num_transit']}.joblib"
+            if cache_file.exists():
+                return joblib.load(cache_file)
+                
         path = row['path']
         planet_id = row['planet_id']
         transit_num = row['num_transit']
+        obj = TransitData(path, planet_id, transit_num, self.axis_info)
+        obj.process()
 
-        return TransitData(path, planet_id, transit_num, self.axis_info)
-    
+        if self.cache_folder:
+            joblib.dump(obj, cache_file)
+
+        return obj
+        
     def save(self, path: Path | str, plots: bool = False) -> None:    
         folder = Path(path)
         object_folder = folder / "objects"
