@@ -1,0 +1,27 @@
+seed: 42
+
+data_module:
+  data_path: ariel-data-challenge-2025
+  batch_size: 32
+  num_workers: 8
+  test_size: 0.1
+
+fabric:
+  devices: auto
+  accelerator: cuda
+  strategy: auto
+  precision: bf16-mixed
+
+model:
+  num_layers: 5
+  hidden_channels: 16
+
+optimizer:
+  lr: 0.00001
+  weight_decay: 0.0
+
+scheduler:
+  pct_cosine: 0.95
+
+train:
+  max_epochs: 5

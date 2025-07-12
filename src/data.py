@@ -10,6 +10,7 @@ import joblib
 from torch.utils.data import Dataset, DataLoader
 import lightning as L
 import torch
+from sklearn.model_selection import train_test_split
 
 
 sensor_sizes_dict = {
@@ -440,9 +441,10 @@ class TransitTrainDataset(Dataset):
         return len(self.data_processor)
     
     def _process(self, a: np.ndarray, b: np.ndarray, sensor: str) -> np.ndarray:
-        diff = torch.from_numpy(np.nan_to_num(a - b))
+        diff = torch.from_numpy(np.nan_to_num(a - b)).unsqueeze(0)
         mean, std = STATS[sensor]
-        return (diff - mean) / std
+        diff = (diff - mean) / std
+        return diff.to(torch.float32)
 
     def __getitem__(self, index: int) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
         obj = self.data_processor[index]
@@ -498,5 +500,59 @@ class TransitTestDataset(TransitTrainDataset):
 
         planet_id = int(obj.planet_id)
         y = torch.tensor([self.gt[planet_id][f"wl_{i}"] for i in range(1, 284)])
+        y = torch.stack([y, y])
 
         return X, y, planet_id
+    
+
+# datamodule
+
+class TransitDataModule(L.LightningDataModule):
+    def __init__(
+            self, 
+            data_path: str, 
+            batch_size: int = 16,
+            num_workers: int = 0,
+            test_size: float = 0.2,
+            random_state: int = 42
+            ) -> None:
+        super().__init__()
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.data_path = Path(data_path)
+        self.test_size = test_size
+        self.random_state = random_state
+
+
+    def setup(self, stage: str | None = None) -> None:
+        planets = list((self.data_path / "train").glob("*"))
+        train_planets, test_planets = train_test_split(
+            planets, test_size=self.test_size, random_state=self.random_state
+        )
+
+        planets_gt = pd.read_csv(self.data_path / "train.csv")
+        axis_info = pd.read_parquet(self.data_path / "axis_info.parquet")
+
+        train_procressor = DataProcessor(train_planets[:32], axis_info=axis_info, cache_folder="data")
+        test_processor = DataProcessor(train_planets[:32], axis_info=axis_info, cache_folder="data")
+
+        self.train_dataset = TransitTrainDataset(train_procressor, planets_gt)
+        self.val_dataset = TransitTestDataset(test_processor, planets_gt)
+
+    def train_dataloader(self) -> torch.utils.data.DataLoader:
+        return torch.utils.data.DataLoader(
+            self.train_dataset, 
+            batch_size=self.batch_size, 
+            shuffle=True,
+            num_workers=self.num_workers,
+            pin_memory=True
+        )
+
+    def val_dataloader(self) -> torch.utils.data.DataLoader:
+        return torch.utils.data.DataLoader(
+            self.val_dataset, 
+            batch_size=self.batch_size, 
+            shuffle=False,
+            num_workers=self.num_workers,
+            pin_memory=True
+        )
