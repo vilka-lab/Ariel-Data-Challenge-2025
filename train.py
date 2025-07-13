@@ -42,16 +42,11 @@ def validate_step(
         val_loss = 0.0
         for batch in tqdm(val_loader, desc="Validation"):
             inputs, targets, _ = batch
-            for k, v in inputs.items():
-                inputs[k] = correct_shape(v)
-
-            targets = correct_shape(targets)
-
             outputs = model(inputs)
             if torch.isnan(outputs).any():
                 raise ValueError("NAN!")
             
-            val_loss += criterion(targets, outputs).item()
+            val_loss += criterion(outputs, targets).item()
 
         val_loss /= len(val_loader)
         fabric.print(f"Validation Loss: {val_loss}")
@@ -83,14 +78,14 @@ def train_step(
         if torch.isnan(outputs).any():
             raise ValueError("NAN!")
         
-        loss = criterion(targets, outputs)
+        loss = criterion(outputs, targets)
 
         # clip gradients
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        # torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
         fabric.backward(loss)
         optimizer.step()
-        scheduler.step()
+        # scheduler.step()
 
     fabric.print(f"Epoch {epoch + 1}, Loss: {loss.item()}")
     
@@ -98,6 +93,15 @@ def train_step(
     fabric.save("last_model.pth", model.state_dict())
     
     return loss.item()
+
+class CustomLoss(torch.nn.Module):
+    def __init__(self, naive_mean: torch.Tensor, naive_std: torch.Tensor):
+        super().__init__()
+        self.mod1 = GaussianLogLikelihoodLoss(naive_mean=naive_mean, naive_std=naive_std)
+        self.mod2 = torch.nn.MSELoss()
+
+    def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
+        return self.mod1(y_pred, y_true) # + self.mod2(y_pred[:, :283], y_true)
 
 def main() -> None:
     config = read_yaml("config.yaml")
@@ -118,8 +122,9 @@ def main() -> None:
     )
     
     naive_mean, naive_std = calc_naive_stats()
-    criterion = GaussianLogLikelihoodLoss(naive_mean=naive_mean, naive_std=naive_std)
+    # criterion = GaussianLogLikelihoodLoss(naive_mean=naive_mean, naive_std=naive_std)
     # criterion = torch.nn.MSELoss()
+    criterion = CustomLoss(naive_mean, naive_std)
 
     model, optimizer = fabric.setup(model, optimizer)
 
@@ -134,18 +139,18 @@ def main() -> None:
         train_losses.append(train_loss)
         
         # Validation step
-        val_loss = validate_step(
-            val_loader, model, criterion, fabric, best_val_loss
-        )
-        best_val_loss = min(best_val_loss, val_loss)
+        # val_loss = validate_step(
+        #     val_loader, model, criterion, fabric, best_val_loss
+        # )
+        # best_val_loss = min(best_val_loss, val_loss)
 
-        val_losses.append(val_loss)
+        # val_losses.append(val_loss)
 
-        # print lr
-        fabric.print(f"Learning rate: {optimizer.param_groups[0]['lr']:.6f}")
+        # # print lr
+        # fabric.print(f"Learning rate: {optimizer.param_groups[0]['lr']:.6f}")
 
-        plot_curves(train_losses, val_losses, save_path="loss_curves.png")
-        fabric.print("")
+        # # plot_curves(train_losses, val_losses, save_path="loss_curves.png")
+        # fabric.print("")
 
 
 

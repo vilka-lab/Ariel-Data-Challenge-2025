@@ -428,8 +428,8 @@ class DataProcessor:
                 continue
 
 STATS = {
-    "AIRS-CH0": [-504, 2485],
-    "FGS1": [-1297, 15787]
+    "AIRS-CH0": [36892, 122805],
+    "FGS1": [99257, 684636]
 }
     
 class TransitTrainDataset(Dataset):
@@ -440,11 +440,14 @@ class TransitTrainDataset(Dataset):
     def __len__(self) -> int:
         return len(self.data_processor)
     
-    def _process(self, a: np.ndarray, b: np.ndarray, sensor: str) -> np.ndarray:
-        diff = torch.from_numpy(np.nan_to_num(a - b)).unsqueeze(0)
+    def _process(self, a: np.ndarray, sensor: str) -> np.ndarray:
+        diff = torch.from_numpy(np.nan_to_num(a))
         mean, std = STATS[sensor]
         diff = (diff - mean) / std
         return diff.to(torch.float32)
+    
+    def _signal_process(self, signal: np.ndarray, sensor: str, indices: list[int]) -> np.ndarray:
+        return torch.stack([self._process(signal[i], sensor) for i in indices])
 
     def __getitem__(self, index: int) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
         obj = self.data_processor[index]
@@ -453,18 +456,16 @@ class TransitTrainDataset(Dataset):
         right_border = edges["t2b"] or edges["transit_end"] or edges["t2a"]
         
         max_index = obj.airs.signal.shape[0]
-        
-        if np.random.rand() < 0.5:
-            high_index = np.random.randint(0, left_border)
-        else:
-            high_index = np.random.randint(right_border, max_index)
 
-        
-        low_index = np.random.randint(left_border, right_border)
+        indices = [
+            np.random.randint(0, left_border),
+            np.random.randint(left_border, right_border),
+            np.random.randint(right_border, max_index),
+        ]
 
         X = {
-            "airs": self._process(obj.airs.signal[low_index], obj.airs.signal[high_index], "AIRS-CH0"),
-            "fgs": self._process(obj.fgs.signal[low_index], obj.fgs.signal[high_index], "FGS1")
+            "airs": self._signal_process(obj.airs.signal, "AIRS-CH0", indices),
+            "fgs": self._signal_process(obj.fgs.signal, "FGS1", indices)
         }
         
         planet_id = int(obj.planet_id)
@@ -482,25 +483,19 @@ class TransitTestDataset(TransitTrainDataset):
         
         max_index = obj.airs.signal.shape[0]
 
-        high_index_left = (0 + left_border) // 2
-        high_index_right = (right_border + max_index) // 2
+        indices = [
+            (0 + left_border) // 2,
+            (left_border + right_border) // 2,
+            (right_border + max_index) // 2
+        ]
 
-        low_index = (left_border + right_border) // 2
-        
         X = {
-            "airs": torch.stack([
-                self._process(obj.airs.signal[high_index_left], obj.airs.signal[low_index], "AIRS-CH0"),
-                self._process(obj.airs.signal[high_index_right], obj.airs.signal[low_index], "AIRS-CH0")
-            ]),
-            "fgs": torch.stack([
-                self._process(obj.fgs.signal[high_index_left], obj.fgs.signal[low_index], "FGS1"),
-                self._process(obj.fgs.signal[high_index_right], obj.fgs.signal[low_index], "FGS1")
-            ])
+            "airs": self._signal_process(obj.airs.signal, "AIRS-CH0", indices),
+            "fgs": self._signal_process(obj.fgs.signal, "FGS1", indices)
         }
-
+        
         planet_id = int(obj.planet_id)
         y = torch.tensor([self.gt[planet_id][f"wl_{i}"] for i in range(1, 284)])
-        y = torch.stack([y, y])
 
         return X, y, planet_id
     
@@ -533,8 +528,8 @@ class TransitDataModule(L.LightningDataModule):
         planets_gt = pd.read_csv(self.data_path / "train.csv")
         axis_info = pd.read_parquet(self.data_path / "axis_info.parquet")
 
-        train_procressor = DataProcessor(train_planets[:32], axis_info=axis_info, cache_folder="data")
-        test_processor = DataProcessor(train_planets[:32], axis_info=axis_info, cache_folder="data")
+        train_procressor = DataProcessor(train_planets[:1], axis_info=axis_info, cache_folder="data")
+        test_processor = DataProcessor(train_planets[:1], axis_info=axis_info, cache_folder="data")
 
         self.train_dataset = TransitTrainDataset(train_procressor, planets_gt)
         self.val_dataset = TransitTestDataset(test_processor, planets_gt)

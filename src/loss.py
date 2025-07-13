@@ -20,9 +20,10 @@ class GaussianLogLikelihoodLoss(torch.nn.Module):
         self.airs_sigma_true = torch.tensor(airs_sigma_true)
         self.fgs_weight = torch.tensor(fgs_weight)
 
-    def forward(self, y_true: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
-        y_pred = output[:, :self.spectrum_len]
-        sigma_pred = torch.clamp(output[:, self.spectrum_len:], min=1e-15)
+    def forward(self, input: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
+        y_pred = input[:, :self.spectrum_len]
+        # sigma_pred = torch.clamp(output[:, self.spectrum_len:], min=1e-15)
+        sigma_pred = input[:, self.spectrum_len:]
 
         sigma_true = torch.cat((torch.tensor([self.fsg_sigma_true]), torch.ones(283 - 1) * self.airs_sigma_true)).to(y_true.device)
 
@@ -40,4 +41,4 @@ class GaussianLogLikelihoodLoss(torch.nn.Module):
         total_weight = weights.sum()
         loss = weighted_sum / total_weight
         
-        return torch.log(-loss)
+        return -loss
