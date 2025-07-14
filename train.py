@@ -4,7 +4,7 @@ import torch
 import pandas as pd
 
 from src.data import TransitDataModule
-from src.model import ConvModel
+from src.model import TransitModel
 from src.loss import GaussianLogLikelihoodLoss
 from src.utils import read_yaml, ConstantCosineLR, plot_curves
 
@@ -113,7 +113,7 @@ def main() -> None:
     L.seed_everything(config["seed"])
     train_loader, val_loader = make_dataloaders(config, fabric)
 
-    model = ConvModel(**config["model"])
+    model = TransitModel(**config["model"])
     optimizer = torch.optim.Adam(model.parameters(), **config["optimizer"])
     scheduler = ConstantCosineLR(
         optimizer,
