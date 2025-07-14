@@ -132,6 +132,11 @@ def main() -> None:
     train_losses, val_losses = [], []
 
     for epoch in range(config["train"]["max_epochs"]):
+        # if epoch in [200, 500]:
+        #     # decrease lr
+        #     for param_group in optimizer.param_groups:
+        #         param_group['lr'] *= 0.1
+
         # Train step
         train_loss = train_step(
             train_loader, model, optimizer, criterion, fabric, epoch, scheduler
@@ -151,6 +156,7 @@ def main() -> None:
 
         # # plot_curves(train_losses, val_losses, save_path="loss_curves.png")
         # fabric.print("")
+        scheduler.step()
 
 
 

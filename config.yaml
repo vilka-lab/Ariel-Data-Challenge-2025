@@ -17,12 +17,13 @@ model:
   hidden_channels: 8
 
 optimizer:
-  lr: 0.00001
-  weight_decay: 0.00
+  lr: 0.0001
+  weight_decay: 0.0
+  betas: [0.9, 0.999]
   # momentum: 0.5
 
 scheduler:
   pct_cosine: 0.95
 
 train:
-  max_epochs: 1500
+  max_epochs: 500
