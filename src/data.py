@@ -431,11 +431,24 @@ STATS = {
     "AIRS-CH0": [36892, 122805],
     "FGS1": [99257, 684636]
 }
+
+META_COLUMNS = ['Rs', 'Ms', 'Ts', 'Mp', 'P', 'sma', 'i']
+META_STATS = {
+    'Rs': [1.25, 0.35],
+    'Ms': [1.09, 0.21],
+    'Ts': [5839.47, 511.61],
+    'Mp': [1.57, 2.26],
+    'P': [5.19, 1.41],
+    'sma': [10.83, 3.03],
+    'i': [88.46, 0.98]
+    }
     
 class TransitTrainDataset(Dataset):
-    def __init__(self, data_processor: DataProcessor, gt: pd.DataFrame) -> None:
+    def __init__(self, data_processor: DataProcessor, gt: pd.DataFrame, meta: pd.DataFrame) -> None:
         self.data_processor = data_processor
         self.gt = gt.set_index("planet_id").to_dict("index")
+
+        self.meta = meta.set_index("planet_id").to_dict("index")
 
     def __len__(self) -> int:
         return len(self.data_processor)
@@ -448,6 +461,15 @@ class TransitTrainDataset(Dataset):
     
     def _signal_process(self, signal: np.ndarray, sensor: str, indices: list[int]) -> np.ndarray:
         return torch.stack([self._process(signal[i], sensor) for i in indices])
+    
+    def _meta_process(self, planet_id: int) -> torch.Tensor:
+        res = []
+        for col in META_COLUMNS:
+            val = self.meta[planet_id][col]
+            mean, std = META_STATS[col]
+            res.append((val - mean) / std)
+
+        return torch.tensor(res, dtype=torch.float32)
 
     def __getitem__(self, index: int) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
         obj = self.data_processor[index]
@@ -463,14 +485,16 @@ class TransitTrainDataset(Dataset):
             np.random.randint(right_border, max_index),
         ]
 
+        planet_id = int(obj.planet_id)
+        
         X = {
             "airs": self._signal_process(obj.airs.signal, "AIRS-CH0", indices),
-            "fgs": self._signal_process(obj.fgs.signal, "FGS1", indices)
+            "fgs": self._signal_process(obj.fgs.signal, "FGS1", indices),
+            "meta": self._meta_process(planet_id)
         }
-        
-        planet_id = int(obj.planet_id)
-        y = torch.tensor([self.gt[planet_id][f"wl_{i}"] for i in range(1, 284)])
 
+        y = torch.tensor([self.gt[planet_id][f"wl_{i}"] for i in range(1, 284)])
+        
         return X, y
     
 
@@ -489,12 +513,14 @@ class TransitTestDataset(TransitTrainDataset):
             (right_border + max_index) // 2
         ]
 
+        planet_id = int(obj.planet_id)
+
         X = {
             "airs": self._signal_process(obj.airs.signal, "AIRS-CH0", indices),
-            "fgs": self._signal_process(obj.fgs.signal, "FGS1", indices)
+            "fgs": self._signal_process(obj.fgs.signal, "FGS1", indices),
+            "meta": self._meta_process(planet_id)
         }
         
-        planet_id = int(obj.planet_id)
         y = torch.tensor([self.gt[planet_id][f"wl_{i}"] for i in range(1, 284)])
 
         return X, y, planet_id
@@ -526,13 +552,14 @@ class TransitDataModule(L.LightningDataModule):
         )
 
         planets_gt = pd.read_csv(self.data_path / "train.csv")
+        meta = pd.read_csv(self.data_path / "train_star_info.csv")
         axis_info = pd.read_parquet(self.data_path / "axis_info.parquet")
 
         train_procressor = DataProcessor(train_planets[:1], axis_info=axis_info, cache_folder="data")
         test_processor = DataProcessor(train_planets[:1], axis_info=axis_info, cache_folder="data")
 
-        self.train_dataset = TransitTrainDataset(train_procressor, planets_gt)
-        self.val_dataset = TransitTestDataset(test_processor, planets_gt)
+        self.train_dataset = TransitTrainDataset(train_procressor, planets_gt, meta)
+        self.val_dataset = TransitTestDataset(test_processor, planets_gt, meta)
 
     def train_dataloader(self) -> torch.utils.data.DataLoader:
         return torch.utils.data.DataLoader(

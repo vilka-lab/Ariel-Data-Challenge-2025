@@ -70,6 +70,20 @@ class FgsTower(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.backbone(x)
         return x
+    
+class MetaTower(nn.Module):
+    def __init__(self, output_features: int = 32) -> None:
+        super().__init__()
+        self.linear = nn.Linear(in_features=7, out_features=output_features)
+        self.norm = nn.LayerNorm(output_features)
+        self.relu = nn.ReLU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.linear(x)
+        x = self.norm(x)
+        x = self.relu(x)
+        return x
+
 
 class TransitModel(nn.Module):
     def __init__(
@@ -78,16 +92,22 @@ class TransitModel(nn.Module):
         hidden_channels: int = 16,
         airs_project_coef: int = 128,
         fgs_output_features: int = 32,
+        meta_output_features: int = 32
         ) -> None:
         super().__init__()
         self.fgs_tower = FgsTower(output_features=fgs_output_features)
         self.airs_tower = AirsTower(num_layers=num_layers, hidden_channels=hidden_channels, project_coef=airs_project_coef)
-        self.linear = nn.Linear(in_features=hidden_channels * airs_project_coef + fgs_output_features, out_features=283*2)
+        self.meta_tower = MetaTower(output_features=meta_output_features)
+        self.linear = nn.Linear(
+            in_features=hidden_channels * airs_project_coef + fgs_output_features + meta_output_features, 
+            out_features=283*2
+            )
 
     def forward(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
         fgs_out = self.fgs_tower(x['fgs'])
         airs_out = self.airs_tower(x['airs'])
-        out = torch.cat([fgs_out, airs_out], dim=1)
+        meta_out = self.meta_tower(x['meta'])
+        out = torch.cat([fgs_out, airs_out, meta_out], dim=1)
 
         out = self.linear(out)
         out[:, :283] /= 100

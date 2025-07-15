@@ -114,6 +114,9 @@ def main() -> None:
     train_loader, val_loader = make_dataloaders(config, fabric)
 
     model = TransitModel(**config["model"])
+    num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    fabric.print(f"Number of trainable parameters: {num_params / 1e6:.4f}M")
+
     optimizer = torch.optim.Adam(model.parameters(), **config["optimizer"])
     scheduler = ConstantCosineLR(
         optimizer,
