@@ -41,7 +41,7 @@ def validate_step(
     with torch.no_grad():
         val_loss = 0.0
         for batch in tqdm(val_loader, desc="Validation"):
-            inputs, targets, _ = batch
+            inputs, targets = batch
             outputs = model(inputs)
             if torch.isnan(outputs).any():
                 raise ValueError("NAN!")
@@ -65,8 +65,7 @@ def train_step(
         optimizer: torch.optim.Optimizer,
         criterion: torch.nn.Module,
         fabric: L.Fabric,
-        epoch: int,
-        scheduler: torch.nn.Module
+        epoch: int
         ) -> torch.Tensor:
     model.train()
 
@@ -85,7 +84,6 @@ def train_step(
 
         fabric.backward(loss)
         optimizer.step()
-        # scheduler.step()
 
     fabric.print(f"Epoch {epoch + 1}, Loss: {loss.item()}")
     
@@ -105,19 +103,20 @@ class CustomLoss(torch.nn.Module):
 
 def main() -> None:
     config = read_yaml("config.yaml")
-    torch.set_float32_matmul_precision("high")
+    torch.set_float32_matmul_precision("highest")
 
     fabric = L.Fabric(**config["fabric"])
+    fabric.seed_everything(config["seed"], workers=True)
     fabric.launch()
 
-    L.seed_everything(config["seed"])
     train_loader, val_loader = make_dataloaders(config, fabric)
 
     model = TransitModel(**config["model"])
+
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     fabric.print(f"Number of trainable parameters: {num_params / 1e6:.4f}M")
 
-    optimizer = torch.optim.Adam(model.parameters(), **config["optimizer"])
+    optimizer = torch.optim.AdamW(model.parameters(), **config["optimizer"])
     scheduler = ConstantCosineLR(
         optimizer,
         total_steps=config["train"]["max_epochs"] * len(train_loader),
@@ -125,11 +124,12 @@ def main() -> None:
     )
     
     naive_mean, naive_std = calc_naive_stats()
-    # criterion = GaussianLogLikelihoodLoss(naive_mean=naive_mean, naive_std=naive_std)
-    # criterion = torch.nn.MSELoss()
     criterion = CustomLoss(naive_mean, naive_std)
 
     model, optimizer = fabric.setup(model, optimizer)
+
+    # xavier initialization
+    model.apply(lambda x: torch.nn.init.xavier_normal_(x.weight) if isinstance(x, torch.nn.Linear) else None)
 
     best_val_loss = float('inf')
     train_losses, val_losses = [], []
@@ -142,7 +142,7 @@ def main() -> None:
 
         # Train step
         train_loss = train_step(
-            train_loader, model, optimizer, criterion, fabric, epoch, scheduler
+            train_loader, model, optimizer, criterion, fabric, epoch
         )
         train_losses.append(train_loss)
         

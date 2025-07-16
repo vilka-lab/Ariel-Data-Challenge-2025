@@ -457,7 +457,7 @@ class TransitTrainDataset(Dataset):
         diff = torch.from_numpy(np.nan_to_num(a))
         mean, std = STATS[sensor]
         diff = (diff - mean) / std
-        return diff.to(torch.float32)
+        return diff
     
     def _signal_process(self, signal: np.ndarray, sensor: str, indices: list[int]) -> np.ndarray:
         return torch.stack([self._process(signal[i], sensor) for i in indices])
@@ -469,7 +469,7 @@ class TransitTrainDataset(Dataset):
             mean, std = META_STATS[col]
             res.append((val - mean) / std)
 
-        return torch.tensor(res, dtype=torch.float32)
+        return torch.tensor(res)
 
     def __getitem__(self, index: int) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
         obj = self.data_processor[index]
@@ -518,12 +518,12 @@ class TransitTestDataset(TransitTrainDataset):
         X = {
             "airs": self._signal_process(obj.airs.signal, "AIRS-CH0", indices),
             "fgs": self._signal_process(obj.fgs.signal, "FGS1", indices),
-            "meta": self._meta_process(planet_id)
+            "meta": self._meta_process(planet_id),
+            "planet_id": planet_id
         }
-        
         y = torch.tensor([self.gt[planet_id][f"wl_{i}"] for i in range(1, 284)])
 
-        return X, y, planet_id
+        return X, y
     
 
 # datamodule
@@ -546,7 +546,7 @@ class TransitDataModule(L.LightningDataModule):
 
 
     def setup(self, stage: str | None = None) -> None:
-        planets = list((self.data_path / "train").glob("*"))
+        planets = sorted(list((self.data_path / "train").glob("*")))
         train_planets, test_planets = train_test_split(
             planets, test_size=self.test_size, random_state=self.random_state
         )
@@ -555,17 +555,17 @@ class TransitDataModule(L.LightningDataModule):
         meta = pd.read_csv(self.data_path / "train_star_info.csv")
         axis_info = pd.read_parquet(self.data_path / "axis_info.parquet")
 
-        train_procressor = DataProcessor(train_planets[:1], axis_info=axis_info, cache_folder="data")
-        test_processor = DataProcessor(train_planets[:1], axis_info=axis_info, cache_folder="data")
+        train_procressor = DataProcessor(train_planets[:29], axis_info=axis_info, cache_folder="data")
+        test_processor = DataProcessor(train_planets[:29], axis_info=axis_info, cache_folder="data")
 
-        self.train_dataset = TransitTrainDataset(train_procressor, planets_gt, meta)
+        self.train_dataset = TransitTestDataset(train_procressor, planets_gt, meta)
         self.val_dataset = TransitTestDataset(test_processor, planets_gt, meta)
 
     def train_dataloader(self) -> torch.utils.data.DataLoader:
         return torch.utils.data.DataLoader(
             self.train_dataset, 
             batch_size=self.batch_size, 
-            shuffle=True,
+            shuffle=False,
             num_workers=self.num_workers,
             pin_memory=True
         )
