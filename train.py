@@ -23,12 +23,8 @@ def calc_naive_stats() -> tuple[float, float]:
     std = values.std()
     return mean, std
 
-def correct_shape(a: torch.Tensor) -> torch.Tensor:
-    shape = list(a.shape)
-    mid_size = shape.pop(1)
-    shape[0] = shape[0] * mid_size
-    return a.reshape(shape)
 
+@torch.no_grad()
 def validate_step(
         val_loader: torch.utils.data.DataLoader, 
         model: torch.nn.Module, 
@@ -38,18 +34,27 @@ def validate_step(
         ) -> torch.Tensor:
     
     model.eval()
-    with torch.no_grad():
-        val_loss = 0.0
-        for batch in tqdm(val_loader, desc="Validation"):
+    total_outputs = []
+
+    for i in range(10):
+        loader_outputs, loader_targets = [], []
+        
+        for batch in val_loader:
             inputs, targets = batch
             outputs = model(inputs)
             if torch.isnan(outputs).any():
                 raise ValueError("NAN!")
             
-            val_loss += criterion(outputs, targets).item()
+            loader_outputs.append(outputs)
+            loader_targets.append(targets)
 
-        val_loss /= len(val_loader)
-        fabric.print(f"Validation Loss: {val_loss}")
+        loader_outputs = torch.cat(loader_outputs, dim=0)
+        loader_targets = torch.cat(loader_targets, dim=0)
+        total_outputs.append(loader_outputs)
+    
+    total_outputs = sum(total_outputs) / 10
+    val_loss = criterion(total_outputs, loader_targets).item()
+    fabric.print(f"Validation Loss: {val_loss}")
 
     if val_loss < best_val_loss:
         best_val_loss = val_loss
@@ -93,13 +98,14 @@ def train_step(
     return loss.item()
 
 class CustomLoss(torch.nn.Module):
-    def __init__(self, naive_mean: torch.Tensor, naive_std: torch.Tensor):
+    def __init__(self, naive_mean: torch.Tensor, naive_std: torch.Tensor, mse_weight: float = 0.0):
         super().__init__()
         self.mod1 = GaussianLogLikelihoodLoss(naive_mean=naive_mean, naive_std=naive_std)
         self.mod2 = torch.nn.MSELoss()
+        self.mse_weight = mse_weight
 
     def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
-        return self.mod1(y_pred, y_true) # + self.mod2(y_pred[:, :283], y_true)
+        return self.mod1(y_pred, y_true) + self.mod2(y_pred[:, :283], y_true) * self.mse_weight
 
 def main() -> None:
     config = read_yaml("config.yaml")
@@ -124,7 +130,8 @@ def main() -> None:
     )
     
     naive_mean, naive_std = calc_naive_stats()
-    criterion = CustomLoss(naive_mean, naive_std)
+    criterion = CustomLoss(naive_mean, naive_std, mse_weight=10.0)
+    val_criterion = CustomLoss(naive_mean, naive_std, mse_weight=0.0)
 
     model, optimizer = fabric.setup(model, optimizer)
 
@@ -135,10 +142,6 @@ def main() -> None:
     train_losses, val_losses = [], []
 
     for epoch in range(config["train"]["max_epochs"]):
-        # if epoch in [200, 500]:
-        #     # decrease lr
-        #     for param_group in optimizer.param_groups:
-        #         param_group['lr'] *= 0.1
 
         # Train step
         train_loss = train_step(
@@ -147,18 +150,18 @@ def main() -> None:
         train_losses.append(train_loss)
         
         # Validation step
-        # val_loss = validate_step(
-        #     val_loader, model, criterion, fabric, best_val_loss
-        # )
-        # best_val_loss = min(best_val_loss, val_loss)
+        val_loss = validate_step(
+            val_loader, model, val_criterion, fabric, best_val_loss
+        )
+        best_val_loss = min(best_val_loss, val_loss)
 
-        # val_losses.append(val_loss)
+        val_losses.append(val_loss)
 
         # # print lr
         # fabric.print(f"Learning rate: {optimizer.param_groups[0]['lr']:.6f}")
 
-        # # plot_curves(train_losses, val_losses, save_path="loss_curves.png")
-        # fabric.print("")
+        plot_curves(train_losses, val_losses, save_path="loss_curves.png")
+        fabric.print("")
         scheduler.step()
 
 

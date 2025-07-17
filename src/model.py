@@ -13,14 +13,47 @@ from torchvision.models import resnet18
 
 
 class Conv2DBlock(nn.Module):
-    def __init__(self, n_input_channels, k_output_channels):
+    def __init__(
+            self, 
+            n_input_channels: int, 
+            k_output_channels: int,
+            kernel_size: tuple[int, int],
+            stride: int,
+            padding: tuple[int, int]
+            ):
         super(Conv2DBlock, self).__init__()
         self.conv = nn.Conv2d(in_channels=n_input_channels,
                               out_channels=k_output_channels,
-                              kernel_size=(32, 1),
-                              stride=1,
-                              padding=(16, 0))  # Padding to maintain spatial dimensions
+                              kernel_size=kernel_size,
+                              stride=stride,
+                              padding=padding
+                              )  # Padding to maintain spatial dimensions
         self.batch_norm = nn.BatchNorm2d(k_output_channels)
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = self.batch_norm(x)
+        x = self.relu(x)
+        return x
+    
+class Conv1DBlock(nn.Module):
+    def __init__(
+            self, 
+            n_input_channels: int, 
+            k_output_channels: int,
+            kernel_size: int,
+            stride: int,
+            padding: int
+            ):
+        super().__init__()
+        self.conv = nn.Conv1d(in_channels=n_input_channels,
+                              out_channels=k_output_channels,
+                              kernel_size=kernel_size,
+                              stride=stride,
+                              padding=padding
+                              )  # Padding to maintain spatial dimensions
+        self.batch_norm = nn.BatchNorm1d(k_output_channels)
         self.relu = nn.ReLU()
 
     def forward(self, x):
@@ -31,7 +64,7 @@ class Conv2DBlock(nn.Module):
     
 class ProjectBlock(nn.Module):
     def __init__(self, n_input_channels, k_output_channels):
-        super(ProjectBlock, self).__init__()
+        super().__init__()
         self.linear = nn.Linear(in_features=n_input_channels, out_features=k_output_channels)
         self.norm = nn.LayerNorm(k_output_channels)
         self.relu = nn.ReLU()
@@ -46,16 +79,30 @@ class ProjectBlock(nn.Module):
 class AirsTower(nn.Module):
     def __init__(self, num_layers: int = 5, hidden_channels: int = 16, project_coef: int = 128) -> None:
         super().__init__()
+        self.input_conv = Conv2DBlock(
+                n_input_channels=3, 
+                k_output_channels=hidden_channels,
+                kernel_size=(32, 1),
+                stride=(1, 1),
+                padding=(0, 0)
+            )
         self.tower = nn.Sequential(
-            Conv2DBlock(n_input_channels=3, k_output_channels=hidden_channels),
-            *[Conv2DBlock(n_input_channels=hidden_channels, k_output_channels=hidden_channels) for _ in range(num_layers-1)]
+            *[
+                Conv1DBlock(
+                    n_input_channels=hidden_channels, 
+                    k_output_channels=hidden_channels,
+                    kernel_size=3, 
+                    stride=1, 
+                    padding=1
+                    ) 
+                for _ in range(num_layers-1)
+            ]
         )
-        self.pooling = nn.MaxPool2d(kernel_size=(32, 1))
         self.project = ProjectBlock(n_input_channels=hidden_channels * 356, k_output_channels=hidden_channels * project_coef)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.input_conv(x).squeeze(2)
         x = self.tower(x)
-        x = self.pooling(x)
         x = self.project(x.view(x.size(0), -1))
         return x
     
