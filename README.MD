@@ -16,3 +16,7 @@ https://www.kaggle.com/competitions/ariel-data-challenge-2025/discussion/587936
 2024 ariel
 
 https://www.kaggle.com/code/skril31/adc-2024-space-coders
+
+
+Starter Solution : 1D + 2D CNN
+https://www.kaggle.com/code/ahsuna123/starter-solution-1d-2d-cnn

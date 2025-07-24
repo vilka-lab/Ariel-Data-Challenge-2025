@@ -96,9 +96,9 @@ class SensorData:
             raise ValueError("Invalid sensor")
         
         if sensor == "AIRS-CH0":
-            self.bin_coef = 5
+            self.bin_coef = 30
         else:
-            self.bin_coef = 60
+            self.bin_coef = 360
         
         self.path = Path(path)
         self.sensor = sensor
@@ -394,54 +394,7 @@ class DataProcessor:
             joblib.dump(obj, cache_file)
 
         return obj
-        
-    def save(self, path: Path | str, plots: bool = False) -> None:    
-        folder = Path(path)
-        object_folder = folder / "objects"
-        object_folder.mkdir(parents=True, exist_ok=True)
-
-        if plots:
-            import matplotlib.pyplot as plt
-            import matplotlib
-            matplotlib.use('Agg')
-            plt.style.use('ggplot')
-
-            plots_folder = folder / "plots"
-
-            airs_raw_plot_folder = plots_folder / "airs_raw_plots"
-            airs_curve_plot_folder = plots_folder / "airs_curve_plots"
-
-            fgs_raw_plot_folder = plots_folder / "fgs_raw_plots"
-            fgs_curve_plot_folder = plots_folder / "fgs_curve_plots"
-
-            plots_folder.mkdir(parents=True, exist_ok=True)
-            airs_raw_plot_folder.mkdir(parents=True, exist_ok=True)
-            airs_curve_plot_folder.mkdir(parents=True, exist_ok=True)
-            fgs_raw_plot_folder.mkdir(parents=True, exist_ok=True)
-            fgs_curve_plot_folder.mkdir(parents=True, exist_ok=True)
-
-        for i, d in tqdm(enumerate(self), desc="Processing data", total=len(self)):
-            try:
-                d.process()
-                name = f"{d.planet_id}_{d.transit_num}"
-                joblib.dump(d, object_folder / f"{name}.joblib")
-
-                if plots:
-                    plot_rules = [
-                        (d.airs.plot_raw, airs_raw_plot_folder),
-                        (d.airs.plot_curve, airs_curve_plot_folder),
-                        (d.fgs.plot_raw, fgs_raw_plot_folder),
-                        (d.fgs.plot_curve, fgs_curve_plot_folder)
-                    ]
-
-                    for f_, save_folder in plot_rules:
-                        fig = f_()
-                        fig.savefig(save_folder / f"{name}.png", bbox_inches="tight")
-                        plt.close(fig)
-
-            except Exception as e:
-                print(f"error in object {i} {d.planet_id = }", e)
-                continue
+  
 
 STATS = {
     "AIRS-CH0": [36892, 122805],
@@ -459,12 +412,33 @@ META_STATS = {
     'i': [88.46, 0.98]
     }
     
-class TransitTrainDataset(Dataset):
-    def __init__(self, data_processor: DataProcessor, gt: pd.DataFrame, meta: pd.DataFrame) -> None:
+class TransitDataset(Dataset):
+    def __init__(
+            self, 
+            data_processor: DataProcessor, 
+            gt: pd.DataFrame | None, 
+            meta: pd.DataFrame,
+            output_stats: dict | None = None,
+            ) -> None:
         self.data_processor = data_processor
-        self.gt = gt.set_index("planet_id").to_dict("index")
+
+        if gt is not None:
+            self.gt = gt.set_index("planet_id").to_dict("index")
+        else:
+            self.gt = None
 
         self.meta = meta.set_index("planet_id").to_dict("index")
+        self.cut_inf = 39
+        self.cut_sup = 321
+        
+        self.output_stats = None
+        if output_stats is None:
+            self.output_stats = self._precalc_stats()
+        else:
+            self.output_stats = output_stats
+
+        self.cache = {}
+
 
     def __len__(self) -> int:
         return len(self.data_processor)
@@ -473,10 +447,14 @@ class TransitTrainDataset(Dataset):
         diff = torch.from_numpy(np.nan_to_num(a))
         mean, std = STATS[sensor]
         diff = (diff - mean) / std
-        return diff
+        return diff.to(torch.float32)
     
-    def _signal_process(self, signal: np.ndarray, sensor: str, indices: list[int]) -> np.ndarray:
-        return torch.stack([self._process(signal[i], sensor) for i in indices])
+    def _signal_process(self, signal: np.ndarray, sensor: str, indices: list[np.ndarray]) -> np.ndarray:
+        output = []
+        for ix in indices:
+            output.append(torch.stack([self._process(signal[i], sensor) for i in ix]))
+
+        return torch.stack(output)
     
     def _meta_process(self, planet_id: int) -> torch.Tensor:
         res = []
@@ -486,61 +464,88 @@ class TransitTrainDataset(Dataset):
             res.append((val - mean) / std)
 
         return torch.tensor(res)
-
-    def __getitem__(self, index: int) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
-        obj = self.data_processor[index]
-        edges = obj.airs.edges
-        left_border = edges["t1a"] or edges["transit_start"] or edges["t1b"]
-        right_border = edges["t2b"] or edges["transit_end"] or edges["t2a"]
-        
-        max_index = obj.airs.signal.shape[0]
-
-        indices = [
-            np.random.randint(0, left_border),
-            np.random.randint(left_border, right_border),
-            np.random.randint(right_border, max_index),
-        ]
-
-        planet_id = int(obj.planet_id)
-        
-        X = {
-            "airs": self._signal_process(obj.airs.signal, "AIRS-CH0", indices),
-            "fgs": self._signal_process(obj.fgs.signal, "FGS1", indices),
-            "meta": self._meta_process(planet_id),
-            "planet_id": planet_id
-        }
-
-        y = torch.tensor([self.gt[planet_id][f"wl_{i}"] for i in range(1, 284)])
-        
-        return X, y
     
-
-class TransitTestDataset(TransitTrainDataset):
-    def __getitem__(self, index: int) -> tuple[dict[str, torch.Tensor], torch.Tensor, int]:
-        obj = self.data_processor[index]
-        edges = obj.airs.edges
-        left_border = edges["t1a"] or edges["transit_start"] or edges["t1b"]
-        right_border = edges["t2b"] or edges["transit_end"] or edges["t2a"]
+    def _get_edges(self, edges: dict) -> tuple[int, int, int, int]:
+        left_st = edges["t1a"] or edges["transit_start"] or edges["t1b"]
+        left_en = edges["t1b"] or edges["transit_start"] or edges["t1a"]
         
-        max_index = obj.airs.signal.shape[0]
+        right_st = edges["t2a"] or edges["transit_end"] or edges["t2b"]
+        right_en = edges["t2b"] or edges["transit_end"] or edges["t2a"]
+        
+        return left_st, left_en, right_st, right_en
+    
+    def _get_white_curve(self, airs: np.ndarray, targets: np.ndarray | None) -> tuple[np.ndarray, np.float32 | None]:
+        airs_summed = airs.sum(axis=2)
+        wc_mean = airs_summed.mean()
+        white_curve = airs_summed.sum(axis=-1) / wc_mean
 
-        indices = [
-            (0 + left_border) // 2,
-            (left_border + right_border) // 2,
-            (right_border + max_index) // 2
-        ]
+        targets_mean = targets.mean() if targets is not None else None
 
+        return white_curve, targets_mean
+
+    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+        if index in self.cache:
+            return self.cache[index]
+
+        obj = self.data_processor[index]
+        
+        left_st, left_en, right_st, right_en = self._get_edges(obj.airs.edges)
+
+        airs = np.nan_to_num(np.moveaxis(obj.airs.signal.astype(np.float32), 1, 2))[:, self.cut_inf:self.cut_sup]
+        fgs = np.nan_to_num(np.moveaxis(obj.fgs.signal.astype(np.float32), 1, 2))
         planet_id = int(obj.planet_id)
 
-        X = {
-            "airs": self._signal_process(obj.airs.signal, "AIRS-CH0", indices),
-            "fgs": self._signal_process(obj.fgs.signal, "FGS1", indices),
-            "meta": self._meta_process(planet_id),
-            "planet_id": planet_id
-        }
-        y = torch.tensor([self.gt[planet_id][f"wl_{i}"] for i in range(1, 284)])
+        if self.gt is not None:
+            targets = np.array([self.gt[planet_id][f"wl_{i}"] for i in range(1, 284)]).astype(np.float32)
+        else:
+            targets = None
 
-        return X, y
+        white_curve, mean_target = self._get_white_curve(airs, targets)
+
+        output = {
+            "white_curve": white_curve[None, :],
+        }
+
+        if mean_target is not None:
+            output["mean_target"] = np.array([mean_target])
+
+        processed = self._postprocess(output)
+        self.cache[index] = processed
+        return processed
+
+    
+    def _postprocess(self, output: dict[str, np.ndarray]) -> dict[str, torch.Tensor]:
+        for k in output:
+            if self.output_stats is not None:
+                mean = self.output_stats[k]["mean"]
+                std = self.output_stats[k]["std"]
+                output[k] = (output[k] - mean) / std
+
+            output[k] = torch.from_numpy(output[k])
+
+        return output
+    
+    def _precalc_stats(self) -> dict[str, dict[str, float]]:
+        stats = {}
+        output_sample = self.__getitem__(0)
+        
+        for k in output_sample:
+            arr = []
+            for i in tqdm(range(self.__len__()), total=self.__len__(), desc=f"Calculating stats for {k}"):
+                sample = self.__getitem__(i)
+                arr.append(sample[k])
+            
+            arr = np.concatenate(arr)
+            stats[k] = {"mean": np.mean(arr), "std": np.std(arr)}
+            print(f"{k} stats: {stats[k]}")
+        
+        return stats
+    
+    def denorm(self, x: torch.Tensor, key: str) -> torch.Tensor:
+        return x * self.output_stats[key]["std"] + self.output_stats[key]["mean"]
+    
+    def get_stats(self) -> dict[str, dict[str, float]]:
+        return self.output_stats
     
 
 # datamodule
@@ -575,8 +580,12 @@ class TransitDataModule(L.LightningDataModule):
         train_procressor = DataProcessor(train_planets, axis_info=axis_info, cache_folder="data")
         test_processor = DataProcessor(test_planets, axis_info=axis_info, cache_folder="data")
 
-        self.train_dataset = TransitTrainDataset(train_procressor, planets_gt, meta)
-        self.val_dataset = TransitTrainDataset(test_processor, planets_gt, meta)
+        output_stats = {
+            "white_curve": {'mean': np.float32(282.0), 'std': np.float32(2.2388432)},
+            "mean_target": {'mean': np.float32(0.014913551), 'std': np.float32(0.010903262)}
+        }
+        self.train_dataset = TransitDataset(train_procressor, planets_gt, meta, output_stats=output_stats)
+        self.val_dataset = TransitDataset(test_processor, planets_gt, meta, output_stats=self.train_dataset.get_stats())
 
     def train_dataloader(self) -> torch.utils.data.DataLoader:
         return torch.utils.data.DataLoader(
@@ -584,7 +593,8 @@ class TransitDataModule(L.LightningDataModule):
             batch_size=self.batch_size, 
             shuffle=True,
             num_workers=self.num_workers,
-            pin_memory=True
+            pin_memory=True,
+            drop_last=True
         )
 
     def val_dataloader(self) -> torch.utils.data.DataLoader:
@@ -593,5 +603,5 @@ class TransitDataModule(L.LightningDataModule):
             batch_size=self.batch_size, 
             shuffle=False,
             num_workers=self.num_workers,
-            pin_memory=True
+            pin_memory=True,
         )
