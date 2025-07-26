@@ -4,7 +4,7 @@ import torch
 import pandas as pd
 
 from src.data import TransitDataModule
-from src.model import MeanTower
+from src.model import TransitModel
 from src.loss import GaussianLogLikelihoodLoss
 from src.utils import read_yaml, ConstantCosineLR, plot_curves
 
@@ -41,14 +41,14 @@ def validate_step(
     loader_outputs, loader_targets = [], []
     
     for batch in val_loader:
-        outputs = model(batch["white_curve"])
+        outputs = model(batch)
         if torch.isnan(outputs).any():
             raise ValueError("NAN!")
         
-        outputs = val_loader.dataset.denorm(outputs, "mean_target")
+        outputs = val_loader.dataset.denorm(outputs, "targets")
         
         loader_outputs.append(outputs)
-        loader_targets.append(batch["mean_target"])
+        loader_targets.append(val_loader.dataset.denorm(batch["targets"], "targets"))
 
     loader_outputs = torch.cat(loader_outputs, dim=0)
     loader_targets = torch.cat(loader_targets, dim=0)
@@ -79,13 +79,13 @@ def train_step(
     for batch in train_loader:
 
         optimizer.zero_grad()
-        outputs = model(batch["white_curve"])
+        outputs = model(batch)
         if torch.isnan(outputs).any():
             raise ValueError("NAN!")
         
-        outputs = train_loader.dataset.denorm(outputs, "mean_target")
+        outputs = train_loader.dataset.denorm(outputs, "targets")
         
-        loss = criterion(outputs, batch["mean_target"])
+        loss = criterion(outputs, train_loader.dataset.denorm(batch["targets"], "targets"))
 
         # clip gradients
         # torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -119,7 +119,7 @@ def main() -> None:
 
     train_loader, val_loader = make_dataloaders(config, fabric)
 
-    model = MeanTower()
+    model = TransitModel()
 
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     fabric.print(f"Number of trainable parameters: {num_params / 1e6:.4f}M")

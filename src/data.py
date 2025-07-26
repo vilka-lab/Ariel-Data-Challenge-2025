@@ -1,5 +1,6 @@
 from pathlib import Path
 import itertools
+import joblib
 
 import pandas as pd
 import numpy as np
@@ -419,7 +420,10 @@ class TransitDataset(Dataset):
             gt: pd.DataFrame | None, 
             meta: pd.DataFrame,
             output_stats: dict | None = None,
+            transit_len: int = 40
             ) -> None:
+        self.cache = {}
+        self.transit_len = transit_len
         self.data_processor = data_processor
 
         if gt is not None:
@@ -432,13 +436,13 @@ class TransitDataset(Dataset):
         self.cut_sup = 321
         
         self.output_stats = None
+        self.precalc = True
         if output_stats is None:
             self.output_stats = self._precalc_stats()
         else:
             self.output_stats = output_stats
 
-        self.cache = {}
-
+        self.precalc = False
 
     def __len__(self) -> int:
         return len(self.data_processor)
@@ -484,13 +488,11 @@ class TransitDataset(Dataset):
         return white_curve, targets_mean
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
-        if index in self.cache:
+        if index in self.cache and not self.precalc:
             return self.cache[index]
 
         obj = self.data_processor[index]
         
-        left_st, left_en, right_st, right_en = self._get_edges(obj.airs.edges)
-
         airs = np.nan_to_num(np.moveaxis(obj.airs.signal.astype(np.float32), 1, 2))[:, self.cut_inf:self.cut_sup]
         fgs = np.nan_to_num(np.moveaxis(obj.fgs.signal.astype(np.float32), 1, 2))
         planet_id = int(obj.planet_id)
@@ -500,27 +502,55 @@ class TransitDataset(Dataset):
         else:
             targets = None
 
-        white_curve, mean_target = self._get_white_curve(airs, targets)
+        white_curve, _ = self._get_white_curve(airs, targets)
+        transit_map = self._get_transit_map(airs, fgs, obj.airs.edges)
 
         output = {
             "white_curve": white_curve[None, :],
+            "transit_map": transit_map[None, :]
         }
 
-        if mean_target is not None:
-            output["mean_target"] = np.array([mean_target])
-
+        if targets is not None:
+            output["targets"] = targets
+            
         processed = self._postprocess(output)
-        self.cache[index] = processed
-        return processed
 
+        if not self.precalc:
+            self.cache[index] = processed
+
+        return processed
     
+    def _get_transit_map(self, airs: np.ndarray, fgs: np.ndarray, edges: dict) -> np.ndarray:
+        left_st, left_en, right_st, right_en = self._get_edges(edges)
+        
+        fgs_column = fgs.sum(axis=1)
+        data = np.concatenate([airs, fgs_column[:, None, :]], axis=1)
+        data = data.sum(axis=-1)
+
+        img_star = data[:left_st].mean(axis=0) + data[right_en:].mean(axis=0)
+        data_norm = data / img_star[None, ...]
+
+        left = left_en or left_st
+        right = right_st or right_en
+
+        mid = (left + right) // 2
+        mid = max(mid, self.transit_len // 2)
+        mid = min(mid, len(data_norm) - self.transit_len // 2)
+
+        corrected_left = mid - self.transit_len // 2
+        corrected_right = mid + self.transit_len // 2
+
+        transit_map = data_norm[corrected_left:corrected_right]
+
+        return transit_map
+
     def _postprocess(self, output: dict[str, np.ndarray]) -> dict[str, torch.Tensor]:
         for k in output:
             if self.output_stats is not None:
                 mean = self.output_stats[k]["mean"]
                 std = self.output_stats[k]["std"]
                 output[k] = (output[k] - mean) / std
-
+            
             output[k] = torch.from_numpy(output[k])
 
         return output
@@ -535,14 +565,15 @@ class TransitDataset(Dataset):
                 sample = self.__getitem__(i)
                 arr.append(sample[k])
             
-            arr = np.concatenate(arr)
-            stats[k] = {"mean": np.mean(arr), "std": np.std(arr)}
-            print(f"{k} stats: {stats[k]}")
-        
+            arr = np.stack(arr, axis=0)
+            stats[k] = {"mean": np.mean(arr, axis=0), "std": np.std(arr, axis=0)}
+
+        joblib.dump(stats, "stats.joblib")
         return stats
-    
+
     def denorm(self, x: torch.Tensor, key: str) -> torch.Tensor:
-        return x * self.output_stats[key]["std"] + self.output_stats[key]["mean"]
+        return x * torch.from_numpy(self.output_stats[key]["std"]).to(x.device) \
+             + torch.from_numpy(self.output_stats[key]["mean"]).to(x.device)
     
     def get_stats(self) -> dict[str, dict[str, float]]:
         return self.output_stats
@@ -580,12 +611,11 @@ class TransitDataModule(L.LightningDataModule):
         train_procressor = DataProcessor(train_planets, axis_info=axis_info, cache_folder="data")
         test_processor = DataProcessor(test_planets, axis_info=axis_info, cache_folder="data")
 
-        output_stats = {
-            "white_curve": {'mean': np.float32(282.0), 'std': np.float32(2.2388432)},
-            "mean_target": {'mean': np.float32(0.014913551), 'std': np.float32(0.010903262)}
-        }
+        # output_stats = joblib.load("stats.joblib")
+        output_stats = None
         self.train_dataset = TransitDataset(train_procressor, planets_gt, meta, output_stats=output_stats)
         self.val_dataset = TransitDataset(test_processor, planets_gt, meta, output_stats=self.train_dataset.get_stats())
+
 
     def train_dataloader(self) -> torch.utils.data.DataLoader:
         return torch.utils.data.DataLoader(
