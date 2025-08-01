@@ -99,3 +99,16 @@ class TransitModel(nn.Module):
         mean = self.mean_tower(x["white_curve"])
         transit = self.transit_tower(x["transit_map"])
         return mean + transit
+    
+
+class UncertaintyModel(nn.Module):
+    def __init__(self, hidden_dim: int = 256):
+        super().__init__()
+        self.weights = nn.Sequential(
+            nn.Linear(7 + 283, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 283)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.exp(self.weights(x) - 8)

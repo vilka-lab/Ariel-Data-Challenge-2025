@@ -354,8 +354,12 @@ class DataProcessor:
     def __init__(self, planets: list[Path], axis_info: pd.DataFrame, cache_folder: str | None = None) -> None:
         self.planets = planets
         self.axis_info = axis_info
-        self.cache_folder = Path(cache_folder) / "objects"
-        self.cache_folder.mkdir(parents=True, exist_ok=True)
+
+        if cache_folder is not None:
+            self.cache_folder = Path(cache_folder) / "objects" 
+            self.cache_folder.mkdir(parents=True, exist_ok=True)
+        else:
+            self.cache_folder = None
 
         self.process()
 
@@ -460,14 +464,9 @@ class TransitDataset(Dataset):
 
         return torch.stack(output)
     
-    def _meta_process(self, planet_id: int) -> torch.Tensor:
-        res = []
-        for col in META_COLUMNS:
-            val = self.meta[planet_id][col]
-            mean, std = META_STATS[col]
-            res.append((val - mean) / std)
-
-        return torch.tensor(res)
+    def _meta_process(self, planet_id: int) -> np.ndarray:
+        res = [self.meta[planet_id][col] for col in META_COLUMNS]
+        return np.array(res).astype(np.float32)
     
     def _get_edges(self, edges: dict) -> tuple[int, int, int, int]:
         left_st = edges["t1a"] or edges["transit_start"] or edges["t1b"]
@@ -507,7 +506,9 @@ class TransitDataset(Dataset):
 
         output = {
             "white_curve": white_curve[None, :],
-            "transit_map": transit_map[None, :]
+            "transit_map": transit_map[None, :],
+            "meta": self._meta_process(planet_id),
+            "planet_id": str(planet_id)
         }
 
         if targets is not None:
@@ -546,13 +547,16 @@ class TransitDataset(Dataset):
 
     def _postprocess(self, output: dict[str, np.ndarray]) -> dict[str, torch.Tensor]:
         for k in output:
+            if k == "planet_id":
+                continue
+
+            output[k] = torch.from_numpy(output[k])
+            
             if self.output_stats is not None:
                 mean = self.output_stats[k]["mean"]
                 std = self.output_stats[k]["std"]
                 output[k] = (output[k] - mean) / std
             
-            output[k] = torch.from_numpy(output[k])
-
         return output
     
     def _precalc_stats(self) -> dict[str, dict[str, float]]:
@@ -560,20 +564,21 @@ class TransitDataset(Dataset):
         output_sample = self.__getitem__(0)
         
         for k in output_sample:
+            if k == "planet_id":
+                continue
+            
             arr = []
             for i in tqdm(range(self.__len__()), total=self.__len__(), desc=f"Calculating stats for {k}"):
                 sample = self.__getitem__(i)
                 arr.append(sample[k])
             
-            arr = np.stack(arr, axis=0)
-            stats[k] = {"mean": np.mean(arr, axis=0), "std": np.std(arr, axis=0)}
+            arr = torch.stack(arr, dim=0)
+            stats[k] = {"mean": torch.mean(arr, dim=0), "std": torch.std(arr, dim=0)}
 
-        joblib.dump(stats, "stats.joblib")
         return stats
 
     def denorm(self, x: torch.Tensor, key: str) -> torch.Tensor:
-        return x * torch.from_numpy(self.output_stats[key]["std"]).to(x.device) \
-             + torch.from_numpy(self.output_stats[key]["mean"]).to(x.device)
+        return x * self.output_stats[key]["std"].to(x.device) + self.output_stats[key]["mean"].to(x.device)
     
     def get_stats(self) -> dict[str, dict[str, float]]:
         return self.output_stats
@@ -608,12 +613,18 @@ class TransitDataModule(L.LightningDataModule):
         meta = pd.read_csv(self.data_path / "train_star_info.csv")
         axis_info = pd.read_parquet(self.data_path / "axis_info.parquet")
 
-        train_procressor = DataProcessor(train_planets, axis_info=axis_info, cache_folder="data")
+        train_processor = DataProcessor(train_planets, axis_info=axis_info, cache_folder="data")
         test_processor = DataProcessor(test_planets, axis_info=axis_info, cache_folder="data")
 
-        # output_stats = joblib.load("stats.joblib")
-        output_stats = None
-        self.train_dataset = TransitDataset(train_procressor, planets_gt, meta, output_stats=output_stats)
+        stats_path = Path("stats.joblib")
+        if not stats_path.exists():
+            output_stats = None
+        else:
+            output_stats = joblib.load(stats_path)
+
+        self.train_dataset = TransitDataset(train_processor, planets_gt, meta, output_stats=output_stats)
+        joblib.dump(self.train_dataset.get_stats(), stats_path)
+
         self.val_dataset = TransitDataset(test_processor, planets_gt, meta, output_stats=self.train_dataset.get_stats())
 
 

@@ -20,3 +20,8 @@ https://www.kaggle.com/code/skril31/adc-2024-space-coders
 
 Starter Solution : 1D + 2D CNN
 https://www.kaggle.com/code/ahsuna123/starter-solution-1d-2d-cnn
+
+pip wheel -w ./packages -r requirements.txt
+
+    pip install -U kaggle==1.6.17
+    kaggle competitions download -c ariel-data-challenge-2025
