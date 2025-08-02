@@ -2,6 +2,7 @@ from pathlib import Path
 import itertools
 import joblib
 
+import scipy
 import pandas as pd
 import numpy as np
 from astropy.stats import sigma_clip
@@ -128,6 +129,7 @@ class SensorData:
         self.flat_field_converted = False
         self.read_converted = False
         self.binned = False
+        self.interpolated = False
 
     def _construct_dt(self, axis_info: pd.DataFrame | None = None) -> None:
         if self.sensor == "AIRS-CH0":
@@ -225,6 +227,40 @@ class SensorData:
     def fill_nan(self) -> None:
         self.signal = np.nan_to_num(self.signal)
 
+    def fill_nans_with_interpolation(self) -> None:
+        if self.interpolated:
+            return
+        
+        # Get the shape of the signal
+        time_steps, _, _ = self.signal.shape
+                
+        for t in range(time_steps):
+            # Get the current frame
+            frame = self.signal[t]
+            
+            # Create a mask for NaNs
+            nan_mask = np.isnan(frame)
+            
+            if np.all(nan_mask):  # Check if all values are NaN
+                continue
+            
+            # Get coordinates of valid points
+            x, y = np.indices(frame.shape)
+            valid_points = ~nan_mask
+            
+            # Prepare points for interpolation
+            points = np.array([x[valid_points], y[valid_points]]).T
+            values = frame[valid_points]
+            
+            # Interpolate over the grid
+            filled_frame = scipy.interpolate.griddata(points, values, (x, y), method='linear')
+            
+            # Fill NaNs in the filled_signal
+            self.signal[t] = np.where(nan_mask, filled_frame, frame)
+        
+        self.interpolated = True
+        
+
     def process(self) -> None:
         self.apply_adc_convert()
         self.apply_mask_hot_dead()
@@ -239,11 +275,11 @@ class SensorData:
             self.find_edges()
         else:
             self.set_edges(None)
-
+        
         self.bin_obs(self.bin_coef)
 
         self.apply_correct_flat_field()
-        # self.fill_nan()
+        self.fill_nans_with_interpolation()
 
     def bin_obs(self, binning: int) -> None:
         if self.binned:
@@ -602,12 +638,29 @@ class TransitDataModule(L.LightningDataModule):
         self.test_size = test_size
         self.random_state = random_state
 
+        self.planets_stop_list = [
+            "926530491",
+            "905997089",
+            "1124834224",
+            "806204363",
+            "158006264",
+            "158006264",
+            "561423413",
+            "1843015807",
+            "1338107575"
+        ]
+
 
     def setup(self, stage: str | None = None) -> None:
         planets = sorted(list((self.data_path / "train").glob("*")))
         train_planets, test_planets = train_test_split(
             planets, test_size=self.test_size, random_state=self.random_state
         )
+
+        print("before", len(train_planets), len(test_planets))
+        train_planets = [p for p in train_planets if p.name not in self.planets_stop_list]
+        test_planets = [p for p in test_planets if p.name not in self.planets_stop_list]
+        print("after", len(train_planets), len(test_planets))
 
         planets_gt = pd.read_csv(self.data_path / "train.csv")
         meta = pd.read_csv(self.data_path / "train_star_info.csv")

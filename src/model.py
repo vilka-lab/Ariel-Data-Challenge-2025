@@ -89,18 +89,6 @@ class TransitTower(nn.Module):
         return self.weights(x)
     
 
-class TransitModel(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.mean_tower = MeanTower()
-        self.transit_tower = TransitTower()
-
-    def forward(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
-        mean = self.mean_tower(x["white_curve"])
-        transit = self.transit_tower(x["transit_map"])
-        return mean + transit
-    
-
 class UncertaintyModel(nn.Module):
     def __init__(self, hidden_dim: int = 256):
         super().__init__()
@@ -112,3 +100,31 @@ class UncertaintyModel(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.exp(self.weights(x) - 8)
+    
+
+def print_stats(a: torch.Tensor, name: str) -> None:
+    print(f"{name} mean: {a.mean()}")
+    print(f"{name} std: {a.std()}")
+    print(f"{name} min: {a.min()}")
+    print(f"{name} max: {a.max()}")
+    print(f"{name} shape: {a.shape}")
+    print("=" * 20)
+
+class TransitModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.mean_tower = MeanTower()
+        self.transit_tower = TransitTower()
+        self.unc_model = UncertaintyModel()
+
+    def forward(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
+        mean = self.mean_tower(x["white_curve"])
+        transit = self.transit_tower(x["transit_map"])
+        spectre = mean + transit
+        unc_input = torch.cat([spectre, x["meta"]], dim=1)
+        unc_out = self.unc_model(unc_input)
+
+        out = torch.cat([spectre, unc_out], dim=1)
+        return out
+    
+

@@ -16,12 +16,12 @@ def make_dataloaders(config: dict, fabric: L.Fabric) -> tuple[L.LightningDataMod
     val_loader = fabric.setup_dataloaders(dm.val_dataloader())
     return train_loader, val_loader
 
-# def calc_naive_stats() -> tuple[float, float]:
-#     gt = pd.read_csv("ariel-data-challenge-2025/train.csv")
-#     values = gt.iloc[:, 1:].values
-#     mean = values.mean()
-#     std = values.std()
-#     return mean, std
+def calc_naive_stats() -> tuple[float, float]:
+    gt = pd.read_csv("ariel-data-challenge-2025/train.csv")
+    values = gt.iloc[:, 1:].values
+    mean = values.mean()
+    std = values.std()
+    return mean, std
 
 EPOCH_DIV = 50
 
@@ -45,7 +45,7 @@ def validate_step(
         if torch.isnan(outputs).any():
             raise ValueError("NAN!")
         
-        outputs = val_loader.dataset.denorm(outputs, "targets")
+        outputs[:, :283] = val_loader.dataset.denorm(outputs[:, :283], "targets")
         
         loader_outputs.append(outputs)
         loader_targets.append(val_loader.dataset.denorm(batch["targets"], "targets"))
@@ -56,11 +56,11 @@ def validate_step(
     val_loss = criterion(loader_outputs, loader_targets).item()
 
     if epoch % EPOCH_DIV == 0:
-        fabric.print(f"Validation Loss: {val_loss:.2f} ppm")
+        fabric.print(f"Validation Loss: {val_loss:.4f}")
 
     if val_loss < best_val_loss:
         best_val_loss = val_loss
-        fabric.print(f"New best validation loss: {best_val_loss:.2f} ppm, saving model...")
+        fabric.print(f"New best validation loss: {best_val_loss:.4f}, saving model...")
         fabric.save("best_model.pth", model.state_dict())
 
     return val_loss
@@ -83,7 +83,7 @@ def train_step(
         if torch.isnan(outputs).any():
             raise ValueError("NAN!")
         
-        outputs = train_loader.dataset.denorm(outputs, "targets")
+        outputs[:, :283] = train_loader.dataset.denorm(outputs[:, :283], "targets")
         
         loss = criterion(outputs, train_loader.dataset.denorm(batch["targets"], "targets"))
 
@@ -94,7 +94,7 @@ def train_step(
         optimizer.step()
     
     if epoch % EPOCH_DIV == 0:
-        fabric.print(f"Epoch {epoch + 1}, Loss: {loss.item():.2f} ppm")
+        fabric.print(f"Epoch {epoch + 1}, Loss: {loss.item():.4f}")
     
     # save last model
     fabric.save("last_model.pth", model.state_dict())
@@ -131,7 +131,7 @@ def main() -> None:
         **config["scheduler"]
     )
     
-    criterion = CustomLoss()
+    criterion = GaussianLogLikelihoodLoss(*calc_naive_stats(), fgs_weight=57.846)
 
     model, optimizer = fabric.setup(model, optimizer)
 
@@ -166,7 +166,7 @@ def main() -> None:
 
         scheduler.step()
 
-    print(f"Done, best val loss: {best_val_loss:.2f} ppm")
+    print(f"Done, best val loss: {best_val_loss:.4f}")
 
 
 if __name__ == "__main__":
