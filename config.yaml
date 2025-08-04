@@ -5,7 +5,7 @@ data_module:
   batch_size: 32
   num_workers: 0
   test_size: 0.1
-  full_train: True
+  full_train: False
 
 fabric:
   devices: auto
@@ -20,7 +20,7 @@ model:
 
 optimizer:
   lr: 0.001
-  weight_decay: 0.005
+  weight_decay: 0.01
   betas: [0.9, 0.999]
   # momentum: 0.9
 

@@ -94,6 +94,7 @@ class UncertaintyModel(nn.Module):
         super().__init__()
         self.weights = nn.Sequential(
             nn.BatchNorm1d(7 + 283),
+            nn.Dropout(0.2),
             nn.Linear(7 + 283, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, 283)
@@ -122,11 +123,13 @@ class TransitModel(nn.Module):
     def forward(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
         mean = self.mean_tower(x["white_curve"])
         transit = self.transit_tower(x["transit_map"])
-        spectre = x["static_component"] + mean + transit
+        spectre = mean + transit
 
         unc_input = torch.cat([spectre, x["meta"]], dim=1)
+        # unc_input = spectre.clone()
         unc_out = self.unc_model(unc_input)
-
+        
+        spectre += x["static_component"]
         out = torch.cat([spectre, unc_out], dim=1)
         return out
     

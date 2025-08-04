@@ -2,6 +2,7 @@ import lightning as L
 from tqdm import tqdm
 import torch
 import pandas as pd
+import numpy as np
 
 from src.data import TransitDataModule
 from src.model import TransitModel
@@ -148,7 +149,7 @@ def main() -> None:
         train_loss = train_step(
             train_loader, model, optimizer, criterion, fabric, epoch
         )
-        train_losses.append(train_loss)
+        train_losses.append(np.clip(train_loss, a_min=None, a_max=1.0))
         
         # Validation step
         val_loss = validate_step(
@@ -156,7 +157,7 @@ def main() -> None:
         )
         best_val_loss = min(best_val_loss, val_loss)
 
-        val_losses.append(val_loss)
+        val_losses.append(np.clip(val_loss, a_min=None, a_max=1.0))
 
         # # print lr
         # fabric.print(f"Learning rate: {optimizer.param_groups[0]['lr']:.6f}")
