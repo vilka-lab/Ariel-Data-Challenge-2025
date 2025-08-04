@@ -112,6 +112,7 @@ class CustomLoss(torch.nn.Module):
 def main() -> None:
     config = read_yaml("config.yaml")
     torch.set_float32_matmul_precision("high")
+    # torch.autograd.set_detect_anomaly(True)
 
     fabric = L.Fabric(**config["fabric"])
     fabric.seed_everything(config["seed"], workers=True)

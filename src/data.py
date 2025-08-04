@@ -13,6 +13,8 @@ from torch.utils.data import Dataset, DataLoader
 import lightning as L
 import torch
 from sklearn.model_selection import train_test_split
+from scipy.signal import savgol_filter
+from scipy.optimize import minimize
 
 
 sensor_sizes_dict = {
@@ -82,6 +84,81 @@ def find_transit_slopes(S, transit_start, transit_end, sigma):
         t2b = None
 
     return t1a, t1b, t2a, t2b
+
+
+# ----------------------------------------
+
+class StaticModelConfig:
+    SCALE = 0.93960
+    SIGMA = 0.0009
+    
+    CUT_INF = 39
+    CUT_SUP = 250
+        
+    MODEL_PHASE_DETECTION_SLICE = slice(30, 140)
+    MODEL_OPTIMIZATION_DELTA = 7
+    MODEL_POLYNOMIAL_DEGREE = 3
+    
+
+class StaticModel:
+    def __init__(self, config):
+        self.cfg = config
+
+    def _phase_detector(self, signal):
+        search_slice = self.cfg.MODEL_PHASE_DETECTION_SLICE
+        min_index = np.argmin(signal[search_slice]) + search_slice.start
+        
+        signal1 = signal[:min_index]
+        signal2 = signal[min_index:]
+
+        grad1 = np.gradient(signal1)
+        grad1 /= grad1.max()
+        
+        grad2 = np.gradient(signal2)
+        grad2 /= grad2.max()
+
+        phase1 = np.argmin(grad1)
+        phase2 = np.argmax(grad2) + min_index
+
+        return phase1, phase2
+    
+    def _objective_function(self, s, signal, phase1, phase2):
+        delta = self.cfg.MODEL_OPTIMIZATION_DELTA
+        power = self.cfg.MODEL_POLYNOMIAL_DEGREE
+
+        if phase1 - delta <= 0 or phase2 + delta >= len(signal) or phase2 - delta - (phase1 + delta) < 5:
+            delta = 2
+
+        y = np.concatenate([
+            signal[: phase1 - delta],
+            signal[phase1 + delta : phase2 - delta] * (1 + s),
+            signal[phase2 + delta :]
+        ])
+        x = np.arange(len(y))
+
+        coeffs = np.polyfit(x, y, deg=power)
+        poly = np.poly1d(coeffs)
+        error = np.abs(poly(x) - y).mean()
+        
+        return error
+
+    def predict(self, single_preprocessed_signal):
+        signal_1d = single_preprocessed_signal[:, 1:].mean(axis=1)
+        signal_1d = savgol_filter(signal_1d, 30, 2)
+        
+        phase1, phase2 = self._phase_detector(signal_1d)
+
+        phase1 = max(self.cfg.MODEL_OPTIMIZATION_DELTA, phase1)
+        phase2 = min(len(signal_1d) - self.cfg.MODEL_OPTIMIZATION_DELTA - 1, phase2)    
+
+        result = minimize(
+            fun=self._objective_function,
+            x0=[0.0001],
+            args=(signal_1d, phase1, phase2),
+            method="Nelder-Mead"
+        )
+        
+        return result.x[0]
 
 
 
@@ -225,7 +302,7 @@ class SensorData:
         self.read_converted = True
 
     def fill_nan(self) -> None:
-        self.signal = np.nan_to_num(self.signal)
+        self.signal = np.nan_to_num(self.signal, nan=np.nanmean(self.signal))
 
     def fill_nans_with_interpolation(self) -> None:
         if self.interpolated:
@@ -279,7 +356,8 @@ class SensorData:
         self.bin_obs(self.bin_coef)
 
         self.apply_correct_flat_field()
-        self.fill_nans_with_interpolation()
+        # self.fill_nans_with_interpolation()
+        self.fill_nan()
 
     def bin_obs(self, binning: int) -> None:
         if self.binned:
@@ -375,6 +453,7 @@ class TransitData:
                 self.airs.edges
             )
         )
+        self._calc_static_component()
 
     def correct_edges(self, airs_max_index: int, fgs_max_index: int, edges: dict) -> None:
         coef = fgs_max_index / airs_max_index
@@ -384,6 +463,19 @@ class TransitData:
             if v:
                 edges[k] = int(v * coef)
         return edges
+    
+    def _calc_static_component(self) -> None:
+        model = StaticModel(StaticModelConfig())
+        fgs = self.fgs.signal[:, 10:22, 10:22].reshape(self.fgs.signal.shape[0], -1)
+        airs = self.airs.signal[:, 10:22, 39:250]
+
+        pdata = np.concatenate([
+            fgs.mean(axis=1)[:, None],
+            airs.mean(axis=1)
+        ], axis=1)
+
+        val = model.predict(pdata)
+        self.static_component = val
         
 
 class DataProcessor:
@@ -544,7 +636,8 @@ class TransitDataset(Dataset):
             "white_curve": white_curve[None, :],
             "transit_map": transit_map[None, :],
             "meta": self._meta_process(planet_id),
-            "planet_id": str(planet_id)
+            "planet_id": str(planet_id),
+            "static_component": np.array([obj.static_component]).astype(np.float32)
         }
 
         if targets is not None:
@@ -629,7 +722,8 @@ class TransitDataModule(L.LightningDataModule):
             batch_size: int = 16,
             num_workers: int = 0,
             test_size: float = 0.2,
-            random_state: int = 42
+            random_state: int = 42,
+            full_train: bool = False,
             ) -> None:
         super().__init__()
         self.batch_size = batch_size
@@ -637,6 +731,7 @@ class TransitDataModule(L.LightningDataModule):
         self.data_path = Path(data_path)
         self.test_size = test_size
         self.random_state = random_state
+        self.full_train = full_train
 
         self.planets_stop_list = [
             "926530491",
@@ -653,13 +748,19 @@ class TransitDataModule(L.LightningDataModule):
 
     def setup(self, stage: str | None = None) -> None:
         planets = sorted(list((self.data_path / "train").glob("*")))
-        train_planets, test_planets = train_test_split(
-            planets, test_size=self.test_size, random_state=self.random_state
-        )
+
+        if not self.full_train:
+            train_planets, test_planets = train_test_split(
+                planets, test_size=self.test_size, random_state=self.random_state
+            )
+        else:
+            train_planets, test_planets = planets, planets
 
         print("before", len(train_planets), len(test_planets))
+
         train_planets = [p for p in train_planets if p.name not in self.planets_stop_list]
         test_planets = [p for p in test_planets if p.name not in self.planets_stop_list]
+        
         print("after", len(train_planets), len(test_planets))
 
         planets_gt = pd.read_csv(self.data_path / "train.csv")
