@@ -15,6 +15,7 @@ import torch
 from sklearn.model_selection import train_test_split
 from scipy.signal import savgol_filter
 from scipy.optimize import minimize
+from sklearn.model_selection import KFold
 
 
 sensor_sizes_dict = {
@@ -465,7 +466,10 @@ class TransitData:
         return edges
     
     def _calc_static_component(self) -> None:
-        model = StaticModel(StaticModelConfig())
+        cfg = StaticModelConfig()
+        cfg.MODEL_PHASE_DETECTION_SLICE = slice(10, len(self.fgs.signal) - 10)
+        model = StaticModel(cfg)
+
         fgs = self.fgs.signal[:, 10:22, 10:22].reshape(self.fgs.signal.shape[0], -1)
         airs = self.airs.signal[:, 10:22, 39:250]
 
@@ -724,6 +728,7 @@ class TransitDataModule(L.LightningDataModule):
             test_size: float = 0.2,
             random_state: int = 42,
             full_train: bool = False,
+            fold: int = 0
             ) -> None:
         super().__init__()
         self.batch_size = batch_size
@@ -732,6 +737,7 @@ class TransitDataModule(L.LightningDataModule):
         self.test_size = test_size
         self.random_state = random_state
         self.full_train = full_train
+        self.fold = fold
 
         self.planets_stop_list = [
             "926530491",
@@ -749,12 +755,17 @@ class TransitDataModule(L.LightningDataModule):
     def setup(self, stage: str | None = None) -> None:
         planets = sorted(list((self.data_path / "train").glob("*")))
 
-        if not self.full_train:
-            train_planets, test_planets = train_test_split(
-                planets, test_size=self.test_size, random_state=self.random_state
-            )
-        else:
-            train_planets, test_planets = planets, planets
+        # if not self.full_train:
+        #     train_planets, test_planets = train_test_split(
+        #         planets, test_size=self.test_size, random_state=self.random_state
+        #     )
+        # else:
+        #     train_planets, test_planets = planets, planets
+
+        kfold = KFold(n_splits=5, shuffle=True, random_state=self.random_state)
+        train_indices, test_indices = list(kfold.split(planets))[self.fold]
+        train_planets = [planets[i] for i in train_indices]
+        test_planets = [planets[i] for i in test_indices]
 
         print("before", len(train_planets), len(test_planets))
 
@@ -770,7 +781,7 @@ class TransitDataModule(L.LightningDataModule):
         train_processor = DataProcessor(train_planets, axis_info=axis_info, cache_folder="data")
         test_processor = DataProcessor(test_planets, axis_info=axis_info, cache_folder="data")
 
-        stats_path = Path("stats.joblib")
+        stats_path = Path(f"stats_{self.fold}.joblib")
         if not stats_path.exists():
             output_stats = None
         else:

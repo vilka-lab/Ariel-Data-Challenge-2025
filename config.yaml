@@ -6,6 +6,7 @@ data_module:
   num_workers: 0
   test_size: 0.1
   full_train: False
+  fold: 4
 
 fabric:
   devices: auto

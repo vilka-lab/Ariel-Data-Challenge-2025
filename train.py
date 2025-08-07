@@ -34,7 +34,8 @@ def validate_step(
         criterion: torch.nn.Module, 
         fabric: L.Fabric,
         best_val_loss: float,
-        epoch: int
+        epoch: int,
+        fold: int
         ) -> torch.Tensor:
     
     model.eval()
@@ -62,7 +63,7 @@ def validate_step(
     if val_loss < best_val_loss:
         best_val_loss = val_loss
         fabric.print(f"New best validation loss: {best_val_loss:.4f}, saving model...")
-        fabric.save("best_model.pth", model.state_dict())
+        fabric.save(f"best_model_{fold}.pth", model.state_dict())
 
     return val_loss
 
@@ -73,7 +74,8 @@ def train_step(
         optimizer: torch.optim.Optimizer,
         criterion: torch.nn.Module,
         fabric: L.Fabric,
-        epoch: int
+        epoch: int,
+        fold: int
         ) -> torch.Tensor:
     model.train()
 
@@ -98,7 +100,7 @@ def train_step(
         fabric.print(f"Epoch {epoch + 1}, Loss: {loss.item():.4f}")
     
     # save last model
-    fabric.save("last_model.pth", model.state_dict())
+    fabric.save(f"last_model_{fold}.pth", model.state_dict())
     
     return loss.item()
 
@@ -142,18 +144,19 @@ def main() -> None:
 
     best_val_loss = float('inf')
     train_losses, val_losses = [], []
-
+    
+    fold = config["data_module"]["fold"]
     for epoch in range(config["train"]["max_epochs"]):
 
         # Train step
         train_loss = train_step(
-            train_loader, model, optimizer, criterion, fabric, epoch
+            train_loader, model, optimizer, criterion, fabric, epoch, fold=fold
         )
         train_losses.append(np.clip(train_loss, a_min=None, a_max=1.0))
         
         # Validation step
         val_loss = validate_step(
-            val_loader, model, criterion, fabric, best_val_loss, epoch
+            val_loader, model, criterion, fabric, best_val_loss, epoch, fold=fold
         )
         best_val_loss = min(best_val_loss, val_loss)
 
@@ -163,12 +166,12 @@ def main() -> None:
         # fabric.print(f"Learning rate: {optimizer.param_groups[0]['lr']:.6f}")
         
         if epoch % EPOCH_DIV == 0:
-            plot_curves(train_losses, val_losses, save_path="loss_curves.png")
+            plot_curves(train_losses, val_losses, save_path=f"loss_curves_{fold}.png")
             fabric.print("")
 
         scheduler.step()
 
-    print(f"Done, best val loss: {best_val_loss:.4f}")
+    print(f"Done for {fold = }, best val loss: {best_val_loss:.4f}")
 
 
 if __name__ == "__main__":
