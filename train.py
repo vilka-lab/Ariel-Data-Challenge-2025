@@ -112,8 +112,7 @@ class CustomLoss(torch.nn.Module):
     def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
         return self.mod(y_pred, y_true) * 1e6
 
-def main() -> None:
-    config = read_yaml("config.yaml")
+def main(config: dict) -> float:
     torch.set_float32_matmul_precision("high")
     # torch.autograd.set_detect_anomaly(True)
 
@@ -147,7 +146,6 @@ def main() -> None:
     
     fold = config["data_module"]["fold"]
     for epoch in range(config["train"]["max_epochs"]):
-
         # Train step
         train_loss = train_step(
             train_loader, model, optimizer, criterion, fabric, epoch, fold=fold
@@ -172,7 +170,19 @@ def main() -> None:
         scheduler.step()
 
     print(f"Done for {fold = }, best val loss: {best_val_loss:.4f}")
+    return best_val_loss
 
 
 if __name__ == "__main__":
-    main()
+    config = read_yaml("config.yaml")
+    
+    losses = []
+    for fold in range(5):
+        print(f"Fold {fold}")
+        config["data_module"]["fold"] = fold
+        
+        loss_val = main(config)
+        losses.append(loss_val)
+
+    print(f"Losses: {losses}")
+    print(f"Mean loss: {np.mean(losses):.4f}")

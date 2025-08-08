@@ -118,19 +118,18 @@ class TransitModel(nn.Module):
         self.mean_tower = MeanTower()
         self.transit_tower = TransitTower()
         self.unc_model = UncertaintyModel()
+        self.static_coef = nn.Parameter(torch.tensor(0.5, dtype=torch.float32, requires_grad=True))
 
 
     def forward(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
         mean = self.mean_tower(x["white_curve"])
         transit = self.transit_tower(x["transit_map"])
-        spectre = mean + transit
+        spectre = mean + transit 
 
         unc_input = torch.cat([spectre, x["meta"]], dim=1)
-        # unc_input = spectre.clone()
         unc_out = self.unc_model(unc_input)
         
-        spectre += x["static_component"]
+        spectre = spectre + x["static_component"] * self.static_coef
         out = torch.cat([spectre, unc_out], dim=1)
         return out
     
-

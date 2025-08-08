@@ -4,6 +4,8 @@ tmp
 *.pyc
 *.npy
 data
+data_old
 *.pth
 *.png
 packages
+*.joblib

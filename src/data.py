@@ -143,8 +143,29 @@ class StaticModel:
         
         return error
 
-    def predict(self, single_preprocessed_signal):
-        signal_1d = single_preprocessed_signal[:, 1:].mean(axis=1)
+    def predict_spectre(self, single_preprocessed_signal) -> np.ndarray:
+        output = []
+        for i in range(single_preprocessed_signal.shape[-1]):
+            signal_1d = single_preprocessed_signal[:, i]
+            signal_1d = savgol_filter(signal_1d, 30, 2)
+            
+            phase1, phase2 = self._phase_detector(signal_1d)
+
+            phase1 = max(self.cfg.MODEL_OPTIMIZATION_DELTA, phase1)
+            phase2 = min(len(signal_1d) - self.cfg.MODEL_OPTIMIZATION_DELTA - 1, phase2)    
+
+            result = minimize(
+                fun=self._objective_function,
+                x0=[0.0001],
+                args=(signal_1d, phase1, phase2),
+                method="Nelder-Mead"
+            )
+            output.append(np.clip(result.x[0], 0.0, None))
+        
+        return np.array(output[::-1])
+    
+    def predict_static(self, single_preprocessed_signal) -> float:
+        signal_1d = single_preprocessed_signal[:, :-1].mean(axis=1)
         signal_1d = savgol_filter(signal_1d, 30, 2)
         
         phase1, phase2 = self._phase_detector(signal_1d)
@@ -471,15 +492,15 @@ class TransitData:
         model = StaticModel(cfg)
 
         fgs = self.fgs.signal[:, 10:22, 10:22].reshape(self.fgs.signal.shape[0], -1)
-        airs = self.airs.signal[:, 10:22, 39:250]
+        airs = self.airs.signal[:, 10:22, 39:321]
 
         pdata = np.concatenate([
+            airs.mean(axis=1),
             fgs.mean(axis=1)[:, None],
-            airs.mean(axis=1)
         ], axis=1)
 
-        val = model.predict(pdata)
-        self.static_component = val
+        self.static_component = model.predict_static(pdata)
+        self.spectre = model.predict_spectre(pdata)
         
 
 class DataProcessor:
@@ -641,7 +662,8 @@ class TransitDataset(Dataset):
             "transit_map": transit_map[None, :],
             "meta": self._meta_process(planet_id),
             "planet_id": str(planet_id),
-            "static_component": np.array([obj.static_component]).astype(np.float32)
+            "static_component": np.array([obj.static_component]).astype(np.float32),
+            "spectre": savgol_filter(obj.spectre.astype(np.float32), 18, 2)
         }
 
         if targets is not None:
@@ -752,7 +774,7 @@ class TransitDataModule(L.LightningDataModule):
         ]
 
 
-    def setup(self, stage: str | None = None) -> None:
+    def setup(self, stage: str | None = None, load_stats: bool = False) -> None:
         planets = sorted(list((self.data_path / "train").glob("*")))
 
         # if not self.full_train:
@@ -782,10 +804,10 @@ class TransitDataModule(L.LightningDataModule):
         test_processor = DataProcessor(test_planets, axis_info=axis_info, cache_folder="data")
 
         stats_path = Path(f"stats_{self.fold}.joblib")
-        if not stats_path.exists():
-            output_stats = None
-        else:
+        if load_stats and stats_path.exists():
             output_stats = joblib.load(stats_path)
+        else:
+            output_stats = None
 
         self.train_dataset = TransitDataset(train_processor, planets_gt, meta, output_stats=output_stats)
         joblib.dump(self.train_dataset.get_stats(), stats_path)
