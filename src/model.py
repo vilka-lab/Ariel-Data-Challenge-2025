@@ -5,88 +5,49 @@ import torch.nn.functional as F
 class MeanTower(nn.Module):
     def __init__(self):
         super().__init__()
-        self.weights = nn.Sequential(
-            nn.Conv1d(1, 32, kernel_size=3),
+        self.num_channels = 283
+        self.conv = nn.Sequential(
+            nn.Conv1d(1, 8, kernel_size=3),
             nn.ReLU(),
             nn.MaxPool1d(2),
-            nn.BatchNorm1d(32),
+            nn.BatchNorm1d(8),
+
+            nn.Conv1d(8, 16, kernel_size=3),
+            nn.ReLU(),
+            nn.MaxPool1d(2),
+            
+            nn.Conv1d(16, 32, kernel_size=3),
+            nn.ReLU(),
+            nn.MaxPool1d(2),
 
             nn.Conv1d(32, 64, kernel_size=3),
             nn.ReLU(),
             nn.MaxPool1d(2),
-            
-            nn.Conv1d(64, 128, kernel_size=3),
-            nn.ReLU(),
-            nn.MaxPool1d(2),
-
-            nn.Conv1d(128, 256, kernel_size=3),
-            nn.ReLU(),
-            nn.MaxPool1d(2),
-            nn.Flatten(),
-
-            nn.Linear(2304, 500),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-
-            nn.Linear(500, 100),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-
-            nn.Linear(100, 1)
         )
+        self.linear = nn.Sequential(
+            nn.Linear(576, 2048),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+
+            nn.Linear(2048, 512),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+
+            nn.Linear(512, 1)
+        )
+        self.out = nn.Linear(self.num_channels, self.num_channels)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.weights(x)
-    
+        B = x.size(0)
+        x = x.reshape(B * self.num_channels, 1, -1)
+        x = self.conv(x)
 
-class TransitTower(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.weights = nn.Sequential(
-                nn.Conv2d(1, 32, kernel_size=(3, 1), padding="same"),
-                nn.ReLU(),
-                nn.MaxPool2d(kernel_size=(2, 1)),
-                nn.BatchNorm2d(32),
+        x = x.view(x.size(0), -1)
+        x = self.linear(x)
 
-                nn.Conv2d(32, 64, kernel_size=(3, 1), padding="same"),
-                nn.ReLU(),
-                nn.MaxPool2d(kernel_size=(2, 1)),
-
-                nn.Conv2d(64, 128, kernel_size=(3, 1), padding="same"),
-                nn.ReLU(),
-                nn.MaxPool2d(kernel_size=(2, 1)),
-
-                nn.Conv2d(128, 256, kernel_size=(3, 1), padding="same"),
-                nn.ReLU(),
-
-                nn.Conv2d(256, 32, kernel_size=(1, 3), padding='same'),
-                nn.ReLU(),
-                nn.MaxPool2d(kernel_size=(1, 2)),
-                nn.BatchNorm2d(32),
-
-                nn.Conv2d(32, 64, kernel_size=(1, 3), padding='same'),
-                nn.ReLU(),
-                nn.MaxPool2d(kernel_size=(1, 2)),
-
-                nn.Conv2d(64, 128, kernel_size=(1, 3), padding='same'),
-                nn.ReLU(),
-                nn.MaxPool2d(kernel_size=(1, 2)),
-
-                nn.Conv2d(128, 256, kernel_size=(1, 3), padding='same'),
-                nn.ReLU(),
-                nn.MaxPool2d(kernel_size=(1, 2)),
-
-                nn.Flatten(),
-                
-                nn.Linear(21760, 700),  # Adjust input size based on pooling
-                nn.ReLU(),
-
-                nn.Dropout(0.2),
-                nn.Linear(700, 283)
-            )
-        
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.weights(x)
+        x = x.view(B, -1)
+        x = self.out(x)
+        return x
     
 
 class UncertaintyModel(nn.Module):
@@ -94,7 +55,7 @@ class UncertaintyModel(nn.Module):
         super().__init__()
         self.weights = nn.Sequential(
             nn.BatchNorm1d(7 + 283),
-            nn.Dropout(0.2),
+            nn.Dropout(0.5),
             nn.Linear(7 + 283, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, 283)
@@ -115,16 +76,14 @@ def print_stats(a: torch.Tensor, name: str) -> None:
 class TransitModel(nn.Module):
     def __init__(self):
         super().__init__()
-        self.mean_tower = MeanTower()
-        self.transit_tower = TransitTower()
+        self.tower = MeanTower()
         self.unc_model = UncertaintyModel()
-        self.static_coef = nn.Parameter(torch.tensor(0.5, dtype=torch.float32, requires_grad=True))
-
+        self.static_coef = torch.nn.Parameter(torch.tensor(0.5))
 
     def forward(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
-        mean = self.mean_tower(x["white_curve"])
-        transit = self.transit_tower(x["transit_map"])
-        spectre = mean + transit 
+        v = torch.transpose(x["curves"], 1, 2) # [N, 283, 187]
+
+        spectre = self.tower(v)
 
         unc_input = torch.cat([spectre, x["meta"]], dim=1)
         unc_out = self.unc_model(unc_input)

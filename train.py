@@ -137,6 +137,7 @@ def main(config: dict) -> float:
     criterion = GaussianLogLikelihoodLoss(*calc_naive_stats(), fgs_weight=57.846)
 
     model, optimizer = fabric.setup(model, optimizer)
+    # model = torch.compile(model)
 
     # xavier initialization
     model.apply(lambda x: torch.nn.init.xavier_normal_(x.weight) if isinstance(x, torch.nn.Linear) else None)

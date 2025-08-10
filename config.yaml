@@ -3,7 +3,7 @@ seed: 42
 data_module:
   data_path: ariel-data-challenge-2025
   batch_size: 32
-  num_workers: 0
+  num_workers: 4
   test_size: 0.1
   full_train: False
   fold: 4

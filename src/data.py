@@ -455,7 +455,26 @@ class SensorData:
                 "t2a": None,
                 "t2b": None
             }
-   
+
+    def reverse(self) -> None:
+        self.signal = self.signal[::-1]
+        if self.edges:
+            n = self.signal.shape[0]
+            (
+                self.edges["transit_start"],
+                self.edges["transit_end"],
+                self.edges["t1a"],
+                self.edges["t1b"],
+                self.edges["t2a"],
+                self.edges["t2b"],
+            ) = (
+                n - self.edges["transit_end"] if self.edges["transit_end"] is not None else None,
+                n - self.edges["transit_start"] if self.edges["transit_start"] is not None else None,
+                n - self.edges["t2b"] if self.edges["t2b"] is not None else None,
+                n - self.edges["t2a"] if self.edges["t2a"] is not None else None,
+                n - self.edges["t1b"] if self.edges["t1b"] is not None else None,
+                n - self.edges["t1a"] if self.edges["t1a"] is not None else None,
+            )
 
 class TransitData:
     def __init__(self, path: Path, planet_id: int, transit_num: int, axis_info: pd.DataFrame) -> None:
@@ -501,6 +520,10 @@ class TransitData:
 
         self.static_component = model.predict_static(pdata)
         self.spectre = model.predict_spectre(pdata)
+
+    def reverse(self) -> None:
+        self.airs.reverse()
+        self.fgs.reverse()
         
 
 class DataProcessor:
@@ -577,11 +600,13 @@ class TransitDataset(Dataset):
             gt: pd.DataFrame | None, 
             meta: pd.DataFrame,
             output_stats: dict | None = None,
-            transit_len: int = 40
+            transit_len: int = 40,
+            is_train: bool = False
             ) -> None:
         self.cache = {}
         self.transit_len = transit_len
         self.data_processor = data_processor
+        self.is_train = is_train
 
         if gt is not None:
             self.gt = gt.set_index("planet_id").to_dict("index")
@@ -630,23 +655,49 @@ class TransitDataset(Dataset):
         
         return left_st, left_en, right_st, right_en
     
-    def _get_white_curve(self, airs: np.ndarray, targets: np.ndarray | None) -> tuple[np.ndarray, np.float32 | None]:
-        airs_summed = airs.sum(axis=2)
-        wc_mean = airs_summed.mean()
-        white_curve = airs_summed.sum(axis=-1) / wc_mean
+    def _get_max_values(self, a: np.ndarray, source: str, pct: float = 0.5) -> np.ndarray:
+        if source == "fgs":
+            start_vals = a[:20, ...].mean(axis=0)
+        else:
+            start_vals = a[:20, ...].mean(axis=(0, 2))
 
-        targets_mean = targets.mean() if targets is not None else None
+        n = int(start_vals.shape[0] * pct)
+        args = np.argsort(start_vals, axis=0)[-n:]
 
-        return white_curve, targets_mean
+        return a[:, args]
+    
+    def _get_curves(self, td: TransitData) -> np.ndarray:
+        airs = td.airs.signal[..., 39:321]
+        fgs = td.fgs.signal.reshape(airs.shape[0], -1)
+
+        fgs_pruned = self._get_max_values(fgs, "fgs", 0.5).mean(axis=1)
+        airs_pruned = self._get_max_values(airs, "airs", 0.5).mean(axis=1)
+
+        signal = np.concatenate([airs_pruned, fgs_pruned[..., None]], axis=1)
+        left_st, left_en, right_st, right_en = self._get_edges(td.airs.edges)
+
+        img_star = np.concatenate(
+            [
+                signal[:left_st], 
+                signal[right_en:]
+            ]
+        )
+        signal = signal / img_star.mean(axis=0)[None, ...]
+        signal = signal.astype(np.float32)
+
+        return signal
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
-        if index in self.cache and not self.precalc:
-            return self.cache[index]
+        if index in self.cache:
+            obj = self.cache[index]
+        else:
+            obj = self.data_processor[index]
+            self.cache[index] = obj
 
-        obj = self.data_processor[index]
+        if not self.precalc and self.is_train:
+            if np.random.rand() < 0.5:
+                obj.reverse()
         
-        airs = np.nan_to_num(np.moveaxis(obj.airs.signal.astype(np.float32), 1, 2))[:, self.cut_inf:self.cut_sup]
-        fgs = np.nan_to_num(np.moveaxis(obj.fgs.signal.astype(np.float32), 1, 2))
         planet_id = int(obj.planet_id)
 
         if self.gt is not None:
@@ -654,12 +705,8 @@ class TransitDataset(Dataset):
         else:
             targets = None
 
-        white_curve, _ = self._get_white_curve(airs, targets)
-        transit_map = self._get_transit_map(airs, fgs, obj.airs.edges)
-
         output = {
-            "white_curve": white_curve[None, :],
-            "transit_map": transit_map[None, :],
+            "curves": self._get_curves(obj),
             "meta": self._meta_process(planet_id),
             "planet_id": str(planet_id),
             "static_component": np.array([obj.static_component]).astype(np.float32),
@@ -671,34 +718,8 @@ class TransitDataset(Dataset):
             
         processed = self._postprocess(output)
 
-        if not self.precalc:
-            self.cache[index] = processed
-
         return processed
     
-    def _get_transit_map(self, airs: np.ndarray, fgs: np.ndarray, edges: dict) -> np.ndarray:
-        left_st, left_en, right_st, right_en = self._get_edges(edges)
-        
-        fgs_column = fgs.sum(axis=1)
-        data = np.concatenate([airs, fgs_column[:, None, :]], axis=1)
-        data = data.sum(axis=-1)
-
-        img_star = data[:left_st].mean(axis=0) + data[right_en:].mean(axis=0)
-        data_norm = data / img_star[None, ...]
-
-        left = left_en or left_st
-        right = right_st or right_en
-
-        mid = (left + right) // 2
-        mid = max(mid, self.transit_len // 2)
-        mid = min(mid, len(data_norm) - self.transit_len // 2)
-
-        corrected_left = mid - self.transit_len // 2
-        corrected_right = mid + self.transit_len // 2
-
-        transit_map = data_norm[corrected_left:corrected_right]
-
-        return transit_map
 
     def _postprocess(self, output: dict[str, np.ndarray]) -> dict[str, torch.Tensor]:
         for k in output:
@@ -809,7 +830,7 @@ class TransitDataModule(L.LightningDataModule):
         else:
             output_stats = None
 
-        self.train_dataset = TransitDataset(train_processor, planets_gt, meta, output_stats=output_stats)
+        self.train_dataset = TransitDataset(train_processor, planets_gt, meta, output_stats=output_stats, is_train=True)
         joblib.dump(self.train_dataset.get_stats(), stats_path)
 
         self.val_dataset = TransitDataset(test_processor, planets_gt, meta, output_stats=self.train_dataset.get_stats())
@@ -831,5 +852,5 @@ class TransitDataModule(L.LightningDataModule):
             batch_size=self.batch_size, 
             shuffle=False,
             num_workers=self.num_workers,
-            pin_memory=True,
+            pin_memory=True
         )
