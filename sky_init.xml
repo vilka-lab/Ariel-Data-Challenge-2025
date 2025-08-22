@@ -1,0 +1,29 @@
+<root>
+    <source> HD 95139662
+        <source_task> CreateCustomSource </source_task>
+
+        <R unit="R_sun"> 1.2022702688142015 </R>
+        <M unit="M_sun"> 1.162580405145975 </M>
+        <T unit="K"> 6358.368970837291 </T>
+        <D unit="pc"> 47.4567 </D>
+        <wl_min unit="um">0.4</wl_min>
+        <wl_max unit="um">4</wl_max>
+        <n_points >1000</n_points>
+
+        <planet> b
+            <signal_task>EstimatePlanetarySignal</signal_task>
+            <t0 unit='hour'>4</t0>
+            <period unit='day'>4.819766799039009</period>
+            <sma>11.20057792421898</sma>
+            <inc unit='deg'>88.03151455652981</inc>
+            <w unit='deg'>0.0</w>
+            <ecc>0.0</ecc>
+            <rp>planet_wl.csv</rp>
+            <limb_darkening>quadratic</limb_darkening>
+            <limb_darkening_coefficients>[0.1, 0.3]</limb_darkening_coefficients>
+        </planet>
+
+    </source>
+
+
+</root>

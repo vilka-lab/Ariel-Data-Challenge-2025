@@ -74,11 +74,11 @@ class TransitTower(nn.Module):
 
                 nn.Conv2d(128, 256, kernel_size=(1, 3), padding='same'),
                 nn.ReLU(),
-                nn.MaxPool2d(kernel_size=(1, 2)),
+                nn.MaxPool2d(kernel_size=(1, 4)),
 
                 nn.Flatten(),
                 
-                nn.Linear(21760, 700),  # Adjust input size based on pooling
+                nn.Linear(14080, 700),  # Adjust input size based on pooling
                 nn.ReLU(),
 
                 nn.Dropout(0.2),

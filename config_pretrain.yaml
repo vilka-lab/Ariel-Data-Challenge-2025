@@ -5,6 +5,8 @@ data_module:
   batch_size: 32
   num_workers: 0
   test_size: 0.1
+  full_train: False
+  fold: 0
 
 fabric:
   devices: auto
