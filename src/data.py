@@ -9,13 +9,10 @@ from astropy.stats import sigma_clip
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import joblib
-from torch.utils.data import Dataset, DataLoader
-import lightning as L
+from torch.utils.data import Dataset
 import torch
-from sklearn.model_selection import train_test_split
 from scipy.signal import savgol_filter
 from scipy.optimize import minimize
-from sklearn.model_selection import KFold
 
 
 sensor_sizes_dict = {
@@ -557,7 +554,26 @@ class DataProcessor:
             joblib.dump(obj, cache_file)
 
         return obj
-  
+    
+
+class CombinedProcessor:
+    def __init__(self, processors: list[DataProcessor]) -> None:
+        self.processors  = processors
+        self.index_mapping = []
+        curr_index = 0
+        for p in processors:
+            self.index_mapping.append((curr_index, curr_index + len(p)))
+            curr_index += len(p)
+
+    def __len__(self) -> int:
+        return sum(len(p) for p in self.processors)
+    
+    def __getitem__(self, index: int) -> TransitData:
+        for i, (st, en) in enumerate(self.index_mapping):
+            if index >= st and index < en:
+                return self.processors[i][index - st]
+            
+        raise StopIteration
 
 STATS = {
     "AIRS-CH0": [36892, 122805],
@@ -635,14 +651,31 @@ class TransitDataset(Dataset):
         
         return left_st, left_en, right_st, right_en
     
-    def _get_white_curve(self, airs: np.ndarray, targets: np.ndarray | None) -> tuple[np.ndarray, np.float32 | None]:
+    def _get_white_curve(self, airs: np.ndarray, targets: np.ndarray | None, edges: dict) -> tuple[np.ndarray, np.float32 | None]:
         airs_summed = airs.sum(axis=2)
         wc_mean = airs_summed.mean()
         white_curve = airs_summed.sum(axis=-1) / wc_mean
 
         targets_mean = targets.mean() if targets is not None else None
 
+        left_st, left_en, right_st, right_en = self._get_edges(edges)
+        left = left_st or left_en
+        right = right_en or right_st
+
+        star = np.concatenate([white_curve[:left], white_curve[right:]])
+        white_curve /= star.mean()
+
         return white_curve, targets_mean
+    
+    def _stats(self, obj: TransitData) -> np.ndarray:
+        fgs = obj.fgs.signal.sum(axis=(1, 2))[..., None]
+        airs = obj.airs.signal.sum(axis=(1))
+        
+        data = np.concatenate([airs, fgs], axis=1)
+        mins = data.min(axis=0)
+        std = data.std(axis=0)
+
+        return np.concatenate([mins, std])
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         if index in self.cache and not self.precalc:
@@ -650,7 +683,7 @@ class TransitDataset(Dataset):
 
         obj = self.data_processor[index]
         
-        airs = np.nan_to_num(np.moveaxis(obj.airs.signal.astype(np.float32), 1, 2))
+        airs = np.nan_to_num(np.moveaxis(obj.airs.signal.astype(np.float32), 1, 2))[:, self.cut_inf:self.cut_sup]
         fgs = np.nan_to_num(np.moveaxis(obj.fgs.signal.astype(np.float32), 1, 2))
         planet_id = int(obj.planet_id)
 
@@ -659,16 +692,16 @@ class TransitDataset(Dataset):
         else:
             targets = None
 
-        white_curve, _ = self._get_white_curve(airs, targets)
+        white_curve, _ = self._get_white_curve(airs, targets, obj.airs.edges)
         transit_map = self._get_transit_map(airs, fgs, obj.airs.edges)
 
         output = {
             "white_curve": white_curve[None, :],
             "transit_map": transit_map[None, :],
             "meta": self._meta_process(planet_id),
+            "stats": self._stats(obj).astype(np.float32),
             "planet_id": str(planet_id),
-            "static_component": np.array([obj.static_component]).astype(np.float32),
-            # "spectre": savgol_filter(obj.spectre.astype(np.float32), 18, 2)
+            "static_component": np.array([obj.static_component]).astype(np.float32)
         }
 
         if targets is not None:
@@ -686,10 +719,14 @@ class TransitDataset(Dataset):
         
         fgs_column = fgs.sum(axis=1)
         data = np.concatenate([airs, fgs_column[:, None, :]], axis=1)
+
         data = data.sum(axis=-1)
 
-        img_star = data[:left_st].mean(axis=0) + data[right_en:].mean(axis=0)
-        data_norm = data / img_star[None, ...]
+        img_star = np.concatenate([
+            data[:left_st],
+            data[right_en:]
+        ]).mean(axis=0)
+        data_norm = np.clip(data / img_star[None, ...], 0.0, 1.0)
 
         left = left_en or left_st
         right = right_st or right_en
@@ -702,6 +739,7 @@ class TransitDataset(Dataset):
         corrected_right = mid + self.transit_len // 2
 
         transit_map = data_norm[corrected_left:corrected_right]
+        # transit_map = data_norm
 
         return transit_map
 
@@ -733,7 +771,7 @@ class TransitDataset(Dataset):
                 arr.append(sample[k])
             
             arr = torch.stack(arr, dim=0)
-            stats[k] = {"mean": torch.mean(arr, dim=0), "std": torch.std(arr, dim=0)}
+            stats[k] = {"mean": torch.mean(arr), "std": torch.std(arr)}
 
         return stats
 
@@ -746,95 +784,3 @@ class TransitDataset(Dataset):
 
 # datamodule
 
-class TransitDataModule(L.LightningDataModule):
-    def __init__(
-            self, 
-            data_path: str, 
-            batch_size: int = 16,
-            num_workers: int = 0,
-            test_size: float = 0.2,
-            random_state: int = 42,
-            full_train: bool = False,
-            fold: int = 0
-            ) -> None:
-        super().__init__()
-        self.batch_size = batch_size
-        self.num_workers = num_workers
-        self.data_path = Path(data_path)
-        self.test_size = test_size
-        self.random_state = random_state
-        self.full_train = full_train
-        self.fold = fold
-
-        self.planets_stop_list = [
-            "926530491",
-            "905997089",
-            "1124834224",
-            "806204363",
-            "158006264",
-            "158006264",
-            "561423413",
-            "1843015807",
-            "1338107575"
-        ]
-
-
-    def setup(self, stage: str | None = None, load_stats: bool = False) -> None:
-        planets = sorted(list((self.data_path / "train").glob("*")))
-
-        # if not self.full_train:
-        #     train_planets, test_planets = train_test_split(
-        #         planets, test_size=self.test_size, random_state=self.random_state
-        #     )
-        # else:
-        #     train_planets, test_planets = planets, planets
-
-        kfold = KFold(n_splits=5, shuffle=True, random_state=self.random_state)
-        train_indices, test_indices = list(kfold.split(planets))[self.fold]
-        train_planets = [planets[i] for i in train_indices]
-        test_planets = [planets[i] for i in test_indices]
-
-        print("before", len(train_planets), len(test_planets))
-
-        train_planets = [p for p in train_planets if p.name not in self.planets_stop_list]
-        test_planets = [p for p in test_planets if p.name not in self.planets_stop_list]
-        
-        print("after", len(train_planets), len(test_planets))
-
-        planets_gt = pd.read_csv(self.data_path / "train.csv")
-        meta = pd.read_csv(self.data_path / "train_star_info.csv")
-        axis_info = pd.read_parquet(self.data_path / "axis_info.parquet")
-
-        train_processor = DataProcessor(train_planets, axis_info=axis_info, cache_folder="cached_data")
-        test_processor = DataProcessor(test_planets, axis_info=axis_info, cache_folder="cached_data")
-
-        stats_path = Path(f"stats_{self.fold}.joblib")
-        if load_stats and stats_path.exists():
-            output_stats = joblib.load(stats_path)
-        else:
-            output_stats = None
-
-        self.train_dataset = TransitDataset(train_processor, planets_gt, meta, output_stats=output_stats)
-        joblib.dump(self.train_dataset.get_stats(), stats_path)
-
-        self.val_dataset = TransitDataset(test_processor, planets_gt, meta, output_stats=self.train_dataset.get_stats())
-
-
-    def train_dataloader(self) -> torch.utils.data.DataLoader:
-        return torch.utils.data.DataLoader(
-            self.train_dataset, 
-            batch_size=self.batch_size, 
-            shuffle=True,
-            num_workers=self.num_workers,
-            pin_memory=True,
-            drop_last=True
-        )
-
-    def val_dataloader(self) -> torch.utils.data.DataLoader:
-        return torch.utils.data.DataLoader(
-            self.val_dataset, 
-            batch_size=self.batch_size, 
-            shuffle=False,
-            num_workers=self.num_workers,
-            pin_memory=True,
-        )

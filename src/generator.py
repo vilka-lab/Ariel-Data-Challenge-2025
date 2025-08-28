@@ -273,5 +273,6 @@ class GeneratedDataProcessor:
                 self.add_bad_id(row["planet_id"])
                 traceback.print_exc()
                 return None
-            
+        
+        gt.transit_num = 0
         return gt

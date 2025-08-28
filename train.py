@@ -4,10 +4,12 @@ import torch
 import pandas as pd
 import numpy as np
 
-from src.data import TransitDataModule
+from src.datamodule import TransitDataModule
 from src.model import TransitModel
 from src.loss import GaussianLogLikelihoodLoss
 from src.utils import read_yaml, ConstantCosineLR, plot_curves
+
+
 
 
 def make_dataloaders(config: dict, fabric: L.Fabric) -> tuple[L.LightningDataModule, L.LightningDataModule]:
@@ -24,7 +26,7 @@ def calc_naive_stats() -> tuple[float, float]:
     std = values.std()
     return mean, std
 
-EPOCH_DIV = 50
+EPOCH_DIV = 1
 
 
 @torch.no_grad()
@@ -78,31 +80,38 @@ def train_step(
         fold: int
         ) -> torch.Tensor:
     model.train()
-
-    for batch in train_loader:
-
-        optimizer.zero_grad()
-        outputs = model(batch)
-        if torch.isnan(outputs).any():
-            raise ValueError("NAN!")
-        
-        outputs[:, :283] = train_loader.dataset.denorm(outputs[:, :283], "targets")
-        
-        loss = criterion(outputs, train_loader.dataset.denorm(batch["targets"], "targets"))
-
-        # clip gradients
-        # torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-
-        fabric.backward(loss)
-        optimizer.step()
     
+    total_loss = 0
+    with tqdm(total=len(train_loader)) as pbar:
+        for i, batch in enumerate(train_loader):
+            optimizer.zero_grad()
+
+            outputs = model(batch)
+            if torch.isnan(outputs).any():
+                raise ValueError("NAN!")
+            
+            outputs[:, :283] = train_loader.dataset.denorm(outputs[:, :283], "targets")
+            
+            loss = criterion(outputs, train_loader.dataset.denorm(batch["targets"], "targets"))
+
+            # clip gradients
+            # torch.nn.utils.clip_grad_norm_(model.parameters(), 0.001)
+            fabric.backward(loss)
+            optimizer.step()
+                
+            pbar.set_description(f"Epoch {epoch + 1}, Loss: {loss.item():.4f}")
+            pbar.update(1)
+            total_loss += loss.item()
+
+    
+    total_loss /= len(train_loader)
     if epoch % EPOCH_DIV == 0:
-        fabric.print(f"Epoch {epoch + 1}, Loss: {loss.item():.4f}")
+        fabric.print(f"Epoch {epoch + 1}, Loss: {total_loss:.4f}")
     
     # save last model
     fabric.save(f"last_model_{fold}.pth", model.state_dict())
     
-    return loss.item()
+    return total_loss
 
 class CustomLoss(torch.nn.Module):
     def __init__(self):
@@ -110,7 +119,7 @@ class CustomLoss(torch.nn.Module):
         self.mod = torch.nn.MSELoss()
 
     def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
-        return self.mod(y_pred, y_true) * 1e6
+        return self.mod(y_pred[:, :283], y_true) * 1e6
 
 def main(config: dict) -> float:
     torch.set_float32_matmul_precision("high")
@@ -130,7 +139,7 @@ def main(config: dict) -> float:
     optimizer = torch.optim.Adam(model.parameters(), **config["optimizer"])
     scheduler = ConstantCosineLR(
         optimizer,
-        total_steps=config["train"]["max_epochs"] * len(train_loader),
+        total_steps=config["train"]["max_epochs"] * len(train_loader) // 32,
         **config["scheduler"]
     )
     
@@ -150,6 +159,7 @@ def main(config: dict) -> float:
         train_loss = train_step(
             train_loader, model, optimizer, criterion, fabric, epoch, fold=fold
         )
+
         train_losses.append(np.clip(train_loss, a_min=None, a_max=1.0))
         
         # Validation step
@@ -177,7 +187,7 @@ if __name__ == "__main__":
     config = read_yaml("config.yaml")
     
     losses = []
-    for fold in range(5):
+    for fold in range(1):
         print(f"Fold {fold}")
         config["data_module"]["fold"] = fold
         
