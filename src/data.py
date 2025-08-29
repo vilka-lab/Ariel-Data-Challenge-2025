@@ -658,8 +658,13 @@ class TransitDataset(Dataset):
         st = left_st or left_en
         en = right_en or right_st
 
-        pred = np.array([1 - self.get_naive(signal[:, i], st, en).min() for i in range(283)][::-1]).astype(np.float32)
-        # pred = savgol_filter(pred, 50, 2)
+        pred = [1 - np.quantile(self.get_naive(signal[:, i], st, en), 0.05) for i in range(283)][::-1]
+        pred.append(left_en - left_st)
+        pred.append(right_en - right_st)
+
+        pred = np.array(pred).astype(np.float32)
+
+        pred = savgol_filter(pred, 50, 2)
         return pred
 
 

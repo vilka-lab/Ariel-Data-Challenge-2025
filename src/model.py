@@ -135,18 +135,25 @@ def print_stats(a: torch.Tensor, name: str) -> None:
     
 
 class TransitModel(nn.Module):
-    def __init__(self, hidden_dim: int = 512, in_features: int = 291):
+    def __init__(self, hidden_dim: int = 512, in_features: int = 293):
         super().__init__()
         self.weights = nn.Sequential(
-            # nn.Dropout(0.2), 
+            nn.Dropout(0.1), 
             nn.Linear(in_features, hidden_dim),
+
             nn.ReLU(),
-            nn.Linear(hidden_dim, 283*2)
+            nn.Linear(hidden_dim, hidden_dim),
+
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 283*2),
         )
+        self.static_coef = nn.Parameter(torch.tensor(1.0, dtype=torch.float32, requires_grad=True))
 
 
     def forward(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
         x = torch.cat([batch["features"], batch["meta"], batch["static_component"]], dim=1)
         out = self.weights(x)
         out[:, 283:] = torch.exp(out[:, 283:] - 8)
+        out[:, :283] += batch["static_component"] * self.static_coef
         return out
