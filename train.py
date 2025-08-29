@@ -79,7 +79,10 @@ def train_step(
         ) -> torch.Tensor:
     model.train()
 
-    for batch in train_loader:
+    total_loss = 0.0
+    # with tqdm(total=len(train_loader), desc=f"Epoch {epoch + 1}", leave=False) as pbar:
+
+    for i, batch in enumerate(train_loader):
 
         optimizer.zero_grad()
         outputs = model(batch)
@@ -95,14 +98,20 @@ def train_step(
 
         fabric.backward(loss)
         optimizer.step()
+
+        total_loss += loss.item()
+            # pbar.update(1)
+            # pbar.set_postfix(loss=f"{loss.item():.4f}")
     
+    total_loss /= len(train_loader)
+
     if epoch % EPOCH_DIV == 0:
-        fabric.print(f"Epoch {epoch + 1}, Loss: {loss.item():.4f}")
+        fabric.print(f"Epoch {epoch + 1}, Loss: {total_loss:.4f}")
     
     # save last model
     fabric.save(f"last_model_{fold}.pth", model.state_dict())
     
-    return loss.item()
+    return total_loss
 
 class CustomLoss(torch.nn.Module):
     def __init__(self):
@@ -177,7 +186,7 @@ if __name__ == "__main__":
     config = read_yaml("config.yaml")
     
     losses = []
-    for fold in range(5):
+    for fold in range(1):
         print(f"Fold {fold}")
         config["data_module"]["fold"] = fold
         

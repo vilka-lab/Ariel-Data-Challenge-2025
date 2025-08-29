@@ -6,7 +6,7 @@ data_module:
   num_workers: 0
   test_size: 0.1
   full_train: False
-  fold: 4
+  fold: 0
 
 fabric:
   devices: auto
@@ -14,14 +14,9 @@ fabric:
   strategy: auto
   precision: 32
 
-model:
-  airs_output_features: 128
-  fgs_output_features: 32
-  meta_output_features: 32
-
 optimizer:
   lr: 0.001
-  weight_decay: 0.01
+  weight_decay: 0.001
   betas: [0.9, 0.999]
   # momentum: 0.9
 

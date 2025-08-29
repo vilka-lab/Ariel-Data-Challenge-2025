@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import timm
 
 class MeanTower(nn.Module):
     def __init__(self):
@@ -24,7 +25,7 @@ class MeanTower(nn.Module):
             nn.MaxPool1d(2),
             nn.Flatten(),
 
-            nn.Linear(2304, 500),
+            nn.Linear(29440, 500),
             nn.ReLU(),
             nn.Dropout(0.2),
 
@@ -34,6 +35,7 @@ class MeanTower(nn.Module):
 
             nn.Linear(100, 1)
         )
+        
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.weights(x)
@@ -112,24 +114,39 @@ def print_stats(a: torch.Tensor, name: str) -> None:
     print(f"{name} shape: {a.shape}")
     print("=" * 20)
 
-class TransitModel(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.mean_tower = MeanTower()
-        self.transit_tower = TransitTower()
-        self.unc_model = UncertaintyModel()
-        self.static_coef = nn.Parameter(torch.tensor(0.5, dtype=torch.float32, requires_grad=True))
+# class TransitModel(nn.Module):
+#     def __init__(self):
+#         super().__init__()
+#         self.transit_tower = TransitTower()
+#         self.unc_model = UncertaintyModel()
+#         self.static_coef = nn.Parameter(torch.tensor(1.0, dtype=torch.float32, requires_grad=True))
 
 
-    def forward(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
-        mean = self.mean_tower(x["white_curve"])
-        transit = self.transit_tower(x["transit_map"])
-        spectre = mean + transit 
+#     def forward(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
+#         transit = self.transit_tower(x["transit_map"])
+#         spectre = transit 
 
-        unc_input = torch.cat([spectre, x["meta"]], dim=1)
-        unc_out = self.unc_model(unc_input)
+#         unc_input = torch.cat([spectre, x["meta"]], dim=1)
+#         unc_out = self.unc_model(unc_input)
         
-        spectre = spectre + x["static_component"] * self.static_coef
-        out = torch.cat([spectre, unc_out], dim=1)
-        return out
+#         spectre = spectre + x["static_component"] * self.static_coef
+#         out = torch.cat([spectre, unc_out], dim=1)
+#         return out
     
+
+class TransitModel(nn.Module):
+    def __init__(self, hidden_dim: int = 512, in_features: int = 291):
+        super().__init__()
+        self.weights = nn.Sequential(
+            # nn.Dropout(0.2), 
+            nn.Linear(in_features, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 283*2)
+        )
+
+
+    def forward(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        x = torch.cat([batch["features"], batch["meta"], batch["static_component"]], dim=1)
+        out = self.weights(x)
+        out[:, 283:] = torch.exp(out[:, 283:] - 8)
+        return out

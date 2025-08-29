@@ -577,7 +577,7 @@ class TransitDataset(Dataset):
             gt: pd.DataFrame | None, 
             meta: pd.DataFrame,
             output_stats: dict | None = None,
-            transit_len: int = 40
+            transit_len: int = 357
             ) -> None:
         self.cache = {}
         self.transit_len = transit_len
@@ -638,6 +638,30 @@ class TransitDataset(Dataset):
         targets_mean = targets.mean() if targets is not None else None
 
         return white_curve, targets_mean
+    
+    def get_naive(self, signal: np.ndarray, st: int, en: int) -> float:
+        star = np.concatenate([signal[st:], signal[en:]])
+        norm_signal = signal / star.mean()
+
+        return norm_signal
+    
+    def get_features(self, obj: TransitData) -> np.ndarray:
+        airs = obj.airs.signal
+        fgs = obj.fgs.signal
+
+        signal = np.concatenate([
+            airs[..., 39:321].sum(axis=1),
+            fgs.sum(axis=(1, 2))[:, None]
+        ], axis=1)
+
+        left_st, left_en, right_st, right_en = self._get_edges(obj.airs.edges)
+        st = left_st or left_en
+        en = right_en or right_st
+
+        pred = np.array([1 - self.get_naive(signal[:, i], st, en).min() for i in range(283)][::-1]).astype(np.float32)
+        # pred = savgol_filter(pred, 50, 2)
+        return pred
+
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         if index in self.cache and not self.precalc:
@@ -645,8 +669,8 @@ class TransitDataset(Dataset):
 
         obj = self.data_processor[index]
         
-        airs = np.nan_to_num(np.moveaxis(obj.airs.signal.astype(np.float32), 1, 2))[:, self.cut_inf:self.cut_sup]
-        fgs = np.nan_to_num(np.moveaxis(obj.fgs.signal.astype(np.float32), 1, 2))
+        # airs = np.nan_to_num(np.moveaxis(obj.airs.signal.astype(np.float32), 1, 2))
+        # fgs = np.nan_to_num(np.moveaxis(obj.fgs.signal.astype(np.float32), 1, 2))
         planet_id = int(obj.planet_id)
 
         if self.gt is not None:
@@ -654,16 +678,17 @@ class TransitDataset(Dataset):
         else:
             targets = None
 
-        white_curve, _ = self._get_white_curve(airs, targets)
-        transit_map = self._get_transit_map(airs, fgs, obj.airs.edges)
+        # white_curve, _ = self._get_white_curve(airs, targets)
+        # transit_map = self._get_transit_map(airs, fgs, obj.airs.edges)
 
         output = {
-            "white_curve": white_curve[None, :],
-            "transit_map": transit_map[None, :],
+            # "white_curve": white_curve[None, :],
+            # "transit_map": transit_map[None, :],
+            "features": self.get_features(obj),
             "meta": self._meta_process(planet_id),
             "planet_id": str(planet_id),
             "static_component": np.array([obj.static_component]).astype(np.float32),
-            "spectre": savgol_filter(obj.spectre.astype(np.float32), 18, 2)
+            # "spectre": savgol_filter(obj.spectre.astype(np.float32), 18, 2)
         }
 
         if targets is not None:
@@ -678,16 +703,16 @@ class TransitDataset(Dataset):
     
     def _get_transit_map(self, airs: np.ndarray, fgs: np.ndarray, edges: dict) -> np.ndarray:
         left_st, left_en, right_st, right_en = self._get_edges(edges)
+        left = left_st or left_en
+        right = right_en or right_st
         
-        fgs_column = fgs.sum(axis=1)
-        data = np.concatenate([airs, fgs_column[:, None, :]], axis=1)
-        data = data.sum(axis=-1)
+        signal = np.concatenate([
+            airs.sum(axis=2),
+            fgs.sum(axis=(1, 2))[:, None]
+        ], axis=1)
+        img_star = np.concatenate([signal[:left], signal[right:]])
 
-        img_star = data[:left_st].mean(axis=0) + data[right_en:].mean(axis=0)
-        data_norm = data / img_star[None, ...]
-
-        left = left_en or left_st
-        right = right_st or right_en
+        data_norm = signal / img_star.mean(axis=0)
 
         mid = (left + right) // 2
         mid = max(mid, self.transit_len // 2)
@@ -723,7 +748,8 @@ class TransitDataset(Dataset):
                 continue
             
             arr = []
-            for i in tqdm(range(self.__len__()), total=self.__len__(), desc=f"Calculating stats for {k}"):
+            num_samples = min(self.__len__(), 100)
+            for i in tqdm(range(num_samples), total=num_samples, desc=f"Calculating stats for {k}"):
                 sample = self.__getitem__(i)
                 arr.append(sample[k])
             
@@ -800,8 +826,8 @@ class TransitDataModule(L.LightningDataModule):
         meta = pd.read_csv(self.data_path / "train_star_info.csv")
         axis_info = pd.read_parquet(self.data_path / "axis_info.parquet")
 
-        train_processor = DataProcessor(train_planets, axis_info=axis_info, cache_folder="data")
-        test_processor = DataProcessor(test_planets, axis_info=axis_info, cache_folder="data")
+        train_processor = DataProcessor(train_planets, axis_info=axis_info, cache_folder="cached_data")
+        test_processor = DataProcessor(test_planets, axis_info=axis_info, cache_folder="cached_data")
 
         stats_path = Path(f"stats_{self.fold}.joblib")
         if load_stats and stats_path.exists():
