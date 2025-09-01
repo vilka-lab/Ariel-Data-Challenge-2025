@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import timm
 
 class MeanTower(nn.Module):
     def __init__(self):
@@ -39,51 +40,91 @@ class MeanTower(nn.Module):
         return self.weights(x)
     
 
+class HorizontalZip(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int):
+        super().__init__()
+        self.weights = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=(3, 3), padding="same"),
+            nn.SiLU(),
+            nn.MaxPool2d(kernel_size=(1, 2)),
+            nn.BatchNorm2d(out_channels),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.weights(x)
+    
+
+class VerticalZip(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int):
+        super().__init__()
+        self.weights = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=(3, 3), padding="same"),
+            nn.SiLU(),
+            nn.MaxPool2d(kernel_size=(2, 1)),
+            nn.BatchNorm2d(out_channels),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.weights(x)
+    
+
+class ConvBlock(nn.Module):
+    def __init__(self, in_channels: int):
+        super().__init__()
+        self.weights = nn.Sequential(
+            nn.Conv2d(in_channels, in_channels // 2, kernel_size=(3, 3), padding="same"),
+            nn.SiLU(),
+            nn.BatchNorm2d(in_channels // 2),
+            nn.Conv2d(in_channels // 2, in_channels, kernel_size=(3, 3), padding="same"),
+            nn.SiLU(),
+            nn.BatchNorm2d(in_channels),
+        )
+        self.resid = nn.Conv2d(in_channels, in_channels, kernel_size=(1, 1), padding="same")
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.weights(x) + self.resid(x)
+    
+    
+
 class TransitTower(nn.Module):
     def __init__(self):
         super().__init__()
         self.weights = nn.Sequential(
-                nn.Conv2d(1, 32, kernel_size=(3, 1), padding="same"),
-                nn.ReLU(),
-                nn.MaxPool2d(kernel_size=(2, 1)),
-                nn.BatchNorm2d(32),
+            nn.Conv2d(1, 4, kernel_size=(5, 5), padding="same"),
 
-                nn.Conv2d(32, 64, kernel_size=(3, 1), padding="same"),
-                nn.ReLU(),
-                nn.MaxPool2d(kernel_size=(2, 1)),
+            HorizontalZip(4, 8),
+            # ConvBlock(8),
 
-                nn.Conv2d(64, 128, kernel_size=(3, 1), padding="same"),
-                nn.ReLU(),
-                nn.MaxPool2d(kernel_size=(2, 1)),
+            VerticalZip(8, 16),
+            # ConvBlock(16),
 
-                nn.Conv2d(128, 256, kernel_size=(3, 1), padding="same"),
-                nn.ReLU(),
+            HorizontalZip(16, 32),
+            # ConvBlock(32),
 
-                nn.Conv2d(256, 32, kernel_size=(1, 3), padding='same'),
-                nn.ReLU(),
-                nn.MaxPool2d(kernel_size=(1, 2)),
-                nn.BatchNorm2d(32),
+            VerticalZip(32, 64),
+            # ConvBlock(64),
 
-                nn.Conv2d(32, 64, kernel_size=(1, 3), padding='same'),
-                nn.ReLU(),
-                nn.MaxPool2d(kernel_size=(1, 2)),
+            HorizontalZip(64, 128),
+            # ConvBlock(128),
 
-                nn.Conv2d(64, 128, kernel_size=(1, 3), padding='same'),
-                nn.ReLU(),
-                nn.MaxPool2d(kernel_size=(1, 2)),
+            # ConvBlock(128),
+            # ConvBlock(128),
 
-                nn.Conv2d(128, 256, kernel_size=(1, 3), padding='same'),
-                nn.ReLU(),
-                nn.MaxPool2d(kernel_size=(1, 2)),
+            VerticalZip(128, 128),
+            HorizontalZip(128, 128),
+            
+            # ConvBlock(128),
+            # ConvBlock(128),
 
-                nn.Flatten(),
-                
-                nn.Linear(21760, 700),  # Adjust input size based on pooling
-                nn.ReLU(),
+            VerticalZip(128, 128),
+            HorizontalZip(128, 128),
+            
+            # ConvBlock(128),
+            # ConvBlock(128),
 
-                nn.Dropout(0.2),
-                nn.Linear(700, 283)
-            )
+            nn.Flatten(),
+            nn.Linear(11264, 283*2),
+        )
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.weights(x)
@@ -104,32 +145,24 @@ class UncertaintyModel(nn.Module):
         return torch.exp(self.weights(x) - 8)
     
 
-def print_stats(a: torch.Tensor, name: str) -> None:
-    print(f"{name} mean: {a.mean()}")
-    print(f"{name} std: {a.std()}")
-    print(f"{name} min: {a.min()}")
-    print(f"{name} max: {a.max()}")
-    print(f"{name} shape: {a.shape}")
-    print("=" * 20)
-
 class TransitModel(nn.Module):
     def __init__(self):
         super().__init__()
         self.mean_tower = MeanTower()
         self.transit_tower = TransitTower()
         self.unc_model = UncertaintyModel()
-        self.static_coef = nn.Parameter(torch.tensor(0.5, dtype=torch.float32, requires_grad=True))
+        # self.static_coef = nn.Parameter(torch.tensor(0.5, dtype=torch.float32, requires_grad=True))
 
 
     def forward(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
         mean = self.mean_tower(x["white_curve"])
         transit = self.transit_tower(x["transit_map"])
-        spectre = mean + transit 
+        spectre = mean + transit[:, :283] 
 
-        unc_input = torch.cat([spectre, x["meta"]], dim=1)
+        unc_input = torch.cat([transit[:, 283:], x["meta"]], dim=1)
         unc_out = self.unc_model(unc_input)
         
-        spectre = spectre + x["static_component"] * self.static_coef
+        # spectre = spectre + x["static_component"] * self.static_coef
         out = torch.cat([spectre, unc_out], dim=1)
         return out
     

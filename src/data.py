@@ -697,10 +697,10 @@ class TransitDataset(Dataset):
         corrected_left = mid - self.transit_len // 2
         corrected_right = mid + self.transit_len // 2
 
-        transit_map = data_norm[corrected_left:corrected_right]
-        # transit_map = data_norm
+        # transit_map = data_norm[corrected_left:corrected_right]
+        transit_map = data_norm
 
-        return transit_map
+        return np.clip(transit_map, 0.0, 2.0)
 
     def _postprocess(self, output: dict[str, np.ndarray]) -> dict[str, torch.Tensor]:
         for k in output:
