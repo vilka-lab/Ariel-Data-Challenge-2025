@@ -177,7 +177,7 @@ if __name__ == "__main__":
     config = read_yaml("config.yaml")
     
     losses = []
-    for fold in range(5):
+    for fold in range(1):
         print(f"Fold {fold}")
         config["data_module"]["fold"] = fold
         

@@ -500,7 +500,7 @@ class TransitData:
         ], axis=1)
 
         self.static_component = model.predict_static(pdata)
-        self.spectre = model.predict_spectre(pdata)
+        # self.spectre = model.predict_spectre(pdata)
         
 
 class DataProcessor:
@@ -663,7 +663,7 @@ class TransitDataset(Dataset):
             "meta": self._meta_process(planet_id),
             "planet_id": str(planet_id),
             "static_component": np.array([obj.static_component]).astype(np.float32),
-            "spectre": savgol_filter(obj.spectre.astype(np.float32), 18, 2)
+            # "spectre": savgol_filter(obj.spectre.astype(np.float32), 18, 2)
         }
 
         if targets is not None:
@@ -683,12 +683,13 @@ class TransitDataset(Dataset):
         data = np.concatenate([airs, fgs_column[:, None, :]], axis=1)
         data = data.sum(axis=-1)
 
-        img_star = data[:left_st].mean(axis=0) + data[right_en:].mean(axis=0)
-        data_norm = data / img_star[None, ...]
+        img_star = np.concatenate([data[:left_st], data[right_en:]], axis=0)
+        data_norm = data / img_star.mean(axis=0)
 
         left = left_en or left_st
         right = right_st or right_en
-
+        
+        # mid = (left_st + left_en) // 2
         mid = (left + right) // 2
         mid = max(mid, self.transit_len // 2)
         mid = min(mid, len(data_norm) - self.transit_len // 2)
@@ -697,6 +698,7 @@ class TransitDataset(Dataset):
         corrected_right = mid + self.transit_len // 2
 
         transit_map = data_norm[corrected_left:corrected_right]
+        # transit_map = data_norm
 
         return transit_map
 
@@ -800,8 +802,8 @@ class TransitDataModule(L.LightningDataModule):
         meta = pd.read_csv(self.data_path / "train_star_info.csv")
         axis_info = pd.read_parquet(self.data_path / "axis_info.parquet")
 
-        train_processor = DataProcessor(train_planets, axis_info=axis_info, cache_folder="data")
-        test_processor = DataProcessor(test_planets, axis_info=axis_info, cache_folder="data")
+        train_processor = DataProcessor(train_planets, axis_info=axis_info, cache_folder="cached_data")
+        test_processor = DataProcessor(test_planets, axis_info=axis_info, cache_folder="cached_data")
 
         stats_path = Path(f"stats_{self.fold}.joblib")
         if load_stats and stats_path.exists():
