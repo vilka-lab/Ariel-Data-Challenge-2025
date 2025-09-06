@@ -78,39 +78,48 @@ def train_step(
         fold: int
         ) -> torch.Tensor:
     model.train()
+    total_loss = 0
+    with tqdm(train_loader, desc=f"Epoch {epoch + 1}", disable=True) as pbar:
+        for batch in train_loader:
 
-    for batch in train_loader:
+            optimizer.zero_grad()
+            outputs = model(batch)
+            if torch.isnan(outputs).any():
+                raise ValueError("NAN!")
+            
+            outputs[:, :283] = train_loader.dataset.denorm(outputs[:, :283], "targets")
+            
+            loss = criterion(outputs, train_loader.dataset.denorm(batch["targets"], "targets"))
 
-        optimizer.zero_grad()
-        outputs = model(batch)
-        if torch.isnan(outputs).any():
-            raise ValueError("NAN!")
-        
-        outputs[:, :283] = train_loader.dataset.denorm(outputs[:, :283], "targets")
-        
-        loss = criterion(outputs, train_loader.dataset.denorm(batch["targets"], "targets"))
+            # clip gradients
+            # torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
-        # clip gradients
-        # torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            total_loss += loss.item()
 
-        fabric.backward(loss)
-        optimizer.step()
+            fabric.backward(loss)
+            optimizer.step()
+            pbar.update(1)
+            pbar.set_postfix({"loss": loss.item()})
+
+    loss = total_loss / len(train_loader)
     
     if epoch % EPOCH_DIV == 0:
-        fabric.print(f"Epoch {epoch + 1}, Loss: {loss.item():.4f}")
+        fabric.print(f"Epoch {epoch + 1}, Loss: {loss:.4f}")
     
     # save last model
     fabric.save(f"last_model_{fold}.pth", model.state_dict())
     
-    return loss.item()
+    return loss
 
 class CustomLoss(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, coef: float):
         super().__init__()
-        self.mod = torch.nn.MSELoss()
+        self.mod1 = torch.nn.MSELoss()
+        self.mod2 = GaussianLogLikelihoodLoss(*calc_naive_stats(), fgs_weight=57.846)
+        self.coef = coef
 
     def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
-        return self.mod(y_pred, y_true) * 1e6
+        return (self.mod1(y_pred[:, :283], y_true) * 1e6) * self.coef + self.mod2(y_pred, y_true) * (1 - self.coef)
 
 def main(config: dict) -> float:
     torch.set_float32_matmul_precision("high")
@@ -123,23 +132,35 @@ def main(config: dict) -> float:
     train_loader, val_loader = make_dataloaders(config, fabric)
 
     model = TransitModel()
+    if config["model"]["checkpoint"] is not None:
+        model.load_state_dict(torch.load(config["model"]["checkpoint"]))
+        fabric.print(f"Loaded model from {config['model']['checkpoint']}")
 
-    num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    fabric.print(f"Number of trainable parameters: {num_params / 1e6:.4f}M")
+    # xavier initialization
+    # model.apply(lambda x: torch.nn.init.xavier_normal_(x.weight) if isinstance(x, torch.nn.Linear) else None)
 
-    optimizer = torch.optim.Adam(model.parameters(), **config["optimizer"])
+    # model = torch.compile(model, mode="default")
+
+    optimizer = torch.optim.AdamW(model.parameters(), **config["optimizer"])
     scheduler = ConstantCosineLR(
         optimizer,
         total_steps=config["train"]["max_epochs"] * len(train_loader),
         **config["scheduler"]
     )
     
-    criterion = GaussianLogLikelihoodLoss(*calc_naive_stats(), fgs_weight=57.846)
+    if config["gauss_loss"]:
+        train_criterion = CustomLoss(coef=0.0)
+        val_criterion = CustomLoss(coef=0.0)
+        # model.freeze_backbone()
+    else:
+        train_criterion = CustomLoss(coef=0.9)
+        val_criterion = CustomLoss(coef=1.0)
+
+    num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    fabric.print(f"Number of trainable parameters: {num_params / 1e6:.4f}M")
+
 
     model, optimizer = fabric.setup(model, optimizer)
-
-    # xavier initialization
-    model.apply(lambda x: torch.nn.init.xavier_normal_(x.weight) if isinstance(x, torch.nn.Linear) else None)
 
     best_val_loss = float('inf')
     train_losses, val_losses = [], []
@@ -148,17 +169,24 @@ def main(config: dict) -> float:
     for epoch in range(config["train"]["max_epochs"]):
         # Train step
         train_loss = train_step(
-            train_loader, model, optimizer, criterion, fabric, epoch, fold=fold
+            train_loader, model, optimizer, train_criterion, fabric, epoch, fold=fold
         )
-        train_losses.append(np.clip(train_loss, a_min=None, a_max=1.0))
-        
+
         # Validation step
         val_loss = validate_step(
-            val_loader, model, criterion, fabric, best_val_loss, epoch, fold=fold
+            val_loader, model, val_criterion, fabric, best_val_loss, epoch, fold=fold
         )
         best_val_loss = min(best_val_loss, val_loss)
-
-        val_losses.append(np.clip(val_loss, a_min=None, a_max=1.0))
+        
+        if config["gauss_loss"]:
+            val_loss = np.clip(val_loss, a_min=None, a_max=1.0)
+            train_loss = np.clip(train_loss, a_min=None, a_max=1.0)
+        else:
+            val_loss = np.clip(val_loss, a_min=None, a_max=2.0)
+            train_loss = np.clip(train_loss, a_min=None, a_max=2.0)
+        
+        val_losses.append(val_loss)
+        train_losses.append(train_loss)
 
         # # print lr
         # fabric.print(f"Learning rate: {optimizer.param_groups[0]['lr']:.6f}")
@@ -180,9 +208,15 @@ if __name__ == "__main__":
     for fold in range(1):
         print(f"Fold {fold}")
         config["data_module"]["fold"] = fold
+        config["gauss_loss"] = False
+
+        main(config)
+
+        # config["gauss_loss"] = True
+        # config["model"]["checkpoint"] = f"best_model_{fold}.pth"
         
-        loss_val = main(config)
-        losses.append(loss_val)
+        # loss_val = main(config)
+        # losses.append(loss_val)
 
     print(f"Losses: {losses}")
     print(f"Mean loss: {np.mean(losses):.4f}")

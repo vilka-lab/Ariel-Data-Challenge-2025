@@ -1,6 +1,7 @@
 from pathlib import Path
 import itertools
 import joblib
+import random
 
 import scipy
 import pandas as pd
@@ -16,6 +17,8 @@ from sklearn.model_selection import train_test_split
 from scipy.signal import savgol_filter
 from scipy.optimize import minimize
 from sklearn.model_selection import KFold
+from src.augmentations import get_augmentations, AugmentationList
+import copy
 
 
 sensor_sizes_dict = {
@@ -197,9 +200,9 @@ class SensorData:
             raise ValueError("Invalid sensor")
         
         if sensor == "AIRS-CH0":
-            self.bin_coef = 30
+            self.bin_coef = 15
         else:
-            self.bin_coef = 360
+            self.bin_coef = 180
         
         self.path = Path(path)
         self.sensor = sensor
@@ -362,11 +365,11 @@ class SensorData:
 
     def process(self) -> None:
         self.apply_adc_convert()
-        self.apply_mask_hot_dead()
-        self.apply_linear_corr()
+        # self.apply_mask_hot_dead()
+        # self.apply_linear_corr()
 
-        self.apply_clean_dark()
-        self.apply_clean_read()
+        # self.apply_clean_dark()
+        # self.apply_clean_read()
 
         self.apply_cds()
 
@@ -377,7 +380,7 @@ class SensorData:
         
         self.bin_obs(self.bin_coef)
 
-        self.apply_correct_flat_field()
+        # self.apply_correct_flat_field()
         # self.fill_nans_with_interpolation()
         self.fill_nan()
 
@@ -455,7 +458,29 @@ class SensorData:
                 "t2a": None,
                 "t2b": None
             }
-   
+
+    def _get_edges(self) -> tuple[int, int, int, int]:
+        edges = self.edges
+        left_st = edges["t1a"] or edges["transit_start"] or edges["t1b"]
+        left_en = edges["t1b"] or edges["transit_start"] or edges["t1a"]
+        
+        right_st = edges["t2a"] or edges["transit_end"] or edges["t2b"]
+        right_en = edges["t2b"] or edges["transit_end"] or edges["t2a"]
+        
+        return left_st, left_en, right_st, right_en
+
+    def normalize(self) -> None:
+        left, _, _, right = self._get_edges()
+        star = np.concatenate([self.signal[:left], self.signal[right:]])
+
+        if self.sensor == "AIRS-CH0":
+            mean = star.mean(axis=(0, 1))
+            std = star.std(axis=(0, 1))
+        else:
+            mean = star.mean()
+            std = star.std()
+
+        self.signal = np.clip((self.signal - mean) / std, -1.0, 3.5)
 
 class TransitData:
     def __init__(self, path: Path, planet_id: int, transit_num: int, axis_info: pd.DataFrame) -> None:
@@ -501,6 +526,10 @@ class TransitData:
 
         self.static_component = model.predict_static(pdata)
         # self.spectre = model.predict_spectre(pdata)
+
+    def normalize(self) -> None:
+        self.airs.normalize()
+        self.fgs.normalize()
         
 
 class DataProcessor:
@@ -577,11 +606,13 @@ class TransitDataset(Dataset):
             gt: pd.DataFrame | None, 
             meta: pd.DataFrame,
             output_stats: dict | None = None,
-            transit_len: int = 40
+            transit_len: int = 40,
+            augmentations: AugmentationList | None = None,
             ) -> None:
         self.cache = {}
         self.transit_len = transit_len
         self.data_processor = data_processor
+        self.augmentations = augmentations if augmentations is not None else AugmentationList([])
 
         if gt is not None:
             self.gt = gt.set_index("planet_id").to_dict("index")
@@ -618,7 +649,17 @@ class TransitDataset(Dataset):
         return torch.stack(output)
     
     def _meta_process(self, planet_id: int) -> np.ndarray:
-        res = [self.meta[planet_id][col] for col in META_COLUMNS]
+        res = []
+        for col in META_COLUMNS:
+            val = self.meta[planet_id][col]
+
+            if len(self.augmentations) > 0 and random.random() < 0.5:
+                mean, std = META_STATS[col]
+                val += np.random.randn() * std * 0.1
+                val = np.clip(val, mean - 3*std, mean + 3*std)
+
+            res.append(val)
+
         return np.array(res).astype(np.float32)
     
     def _get_edges(self, edges: dict) -> tuple[int, int, int, int]:
@@ -630,84 +671,75 @@ class TransitDataset(Dataset):
         
         return left_st, left_en, right_st, right_en
     
-    def _get_white_curve(self, airs: np.ndarray, targets: np.ndarray | None) -> tuple[np.ndarray, np.float32 | None]:
-        airs_summed = airs.sum(axis=2)
-        wc_mean = airs_summed.mean()
-        white_curve = airs_summed.sum(axis=-1) / wc_mean
-
-        targets_mean = targets.mean() if targets is not None else None
-
-        return white_curve, targets_mean
+    def _get_white_curve(self, signal: np.ndarray) -> np.ndarray:
+        return signal.mean(axis=1)
+    
+    def _get_transit_map(self, signal: np.ndarray) -> np.ndarray:
+        return signal
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
-        if index in self.cache and not self.precalc:
-            return self.cache[index]
-
-        obj = self.data_processor[index]
-        
-        airs = np.nan_to_num(np.moveaxis(obj.airs.signal.astype(np.float32), 1, 2))[:, self.cut_inf:self.cut_sup]
-        fgs = np.nan_to_num(np.moveaxis(obj.fgs.signal.astype(np.float32), 1, 2))
-        planet_id = int(obj.planet_id)
-
-        if self.gt is not None:
-            targets = np.array([self.gt[planet_id][f"wl_{i}"] for i in range(1, 284)]).astype(np.float32)
-        else:
-            targets = None
-
-        white_curve, _ = self._get_white_curve(airs, targets)
-        transit_map = self._get_transit_map(airs, fgs, obj.airs.edges)
-
-        output = {
-            "white_curve": white_curve[None, :],
-            "transit_map": transit_map[None, :],
-            "meta": self._meta_process(planet_id),
-            "planet_id": str(planet_id),
-            "static_component": np.array([obj.static_component]).astype(np.float32),
-            # "spectre": savgol_filter(obj.spectre.astype(np.float32), 18, 2)
-        }
-
-        if targets is not None:
-            output["targets"] = targets
+        if index not in self.cache:
+            obj = self.data_processor[index]
+            obj.normalize()
             
-        processed = self._postprocess(output)
+            airs = np.nan_to_num(obj.airs.signal).astype(np.float32)[:, :, self.cut_inf:].mean(axis=1)
+            fgs = np.nan_to_num(obj.fgs.signal).astype(np.float32).mean(axis=(1, 2))
+            signal = np.concatenate([airs, fgs[:, None]], axis=1)
+            planet_id = int(obj.planet_id)
 
+            if self.gt is not None:
+                targets = np.array([self.gt[planet_id][f"wl_{i}"] for i in range(1, 284)]).astype(np.float32)
+            else:
+                targets = None
+
+            # white_curve = self._get_white_curve(signal)
+            transit_map = self._get_transit_map(signal)
+
+            output = {
+                # "white_curve": white_curve[None, :],
+                "transit_map": transit_map[None, :],
+                "meta": torch.from_numpy(self._meta_process(planet_id)),
+                "planet_id": str(planet_id),
+                "static_component": torch.from_numpy(np.array([obj.static_component]).astype(np.float32)),
+                # "spectre": savgol_filter(obj.spectre.astype(np.float32), 18, 2)
+            }
+
+            if targets is not None:
+                output["targets"] = torch.from_numpy(targets)
+
+            self.cache[index] = output
+
+        cached_output = self.cache[index]
+        output = {
+            "transit_map": cached_output["transit_map"].copy(),
+            "meta": cached_output["meta"].clone(),
+            "planet_id": cached_output["planet_id"],
+            "targets": cached_output.get("targets"),
+            "static_component": cached_output["static_component"].clone(),
+        }
+        
         if not self.precalc:
-            self.cache[index] = processed
+            output["transit_map"] = torch.from_numpy(
+                self.augmentations(output["transit_map"])
+                )
+            
+            if len(self.augmentations) > 0 and random.random() < 0.5:
+                # add random noise
+                output["static_component"] += torch.randn_like(output["static_component"]) * 0.0005
 
-        return processed
+        else:
+            output["transit_map"] = torch.from_numpy(output["transit_map"])
+            
+        output = self._postprocess(output)
+
+        return output
     
-    def _get_transit_map(self, airs: np.ndarray, fgs: np.ndarray, edges: dict) -> np.ndarray:
-        left_st, left_en, right_st, right_en = self._get_edges(edges)
-        
-        fgs_column = fgs.sum(axis=1)
-        data = np.concatenate([airs, fgs_column[:, None, :]], axis=1)
-        data = data.sum(axis=-1)
-
-        img_star = np.concatenate([data[:left_st], data[right_en:]], axis=0)
-        data_norm = data / img_star.mean(axis=0)
-
-        left = left_en or left_st
-        right = right_st or right_en
-        
-        # mid = (left_st + left_en) // 2
-        mid = (left + right) // 2
-        mid = max(mid, self.transit_len // 2)
-        mid = min(mid, len(data_norm) - self.transit_len // 2)
-
-        corrected_left = mid - self.transit_len // 2
-        corrected_right = mid + self.transit_len // 2
-
-        # transit_map = data_norm[corrected_left:corrected_right]
-        transit_map = data_norm
-
-        return np.clip(transit_map, 0.0, 2.0)
+    
 
     def _postprocess(self, output: dict[str, np.ndarray]) -> dict[str, torch.Tensor]:
         for k in output:
-            if k == "planet_id":
+            if k in ["planet_id", "start", "end", "samples"]:
                 continue
-
-            output[k] = torch.from_numpy(output[k])
             
             if self.output_stats is not None:
                 mean = self.output_stats[k]["mean"]
@@ -721,16 +753,21 @@ class TransitDataset(Dataset):
         output_sample = self.__getitem__(0)
         
         for k in output_sample:
-            if k == "planet_id":
+            if k in ["planet_id", "start", "end", "samples"]:
                 continue
             
             arr = []
-            for i in tqdm(range(self.__len__()), total=self.__len__(), desc=f"Calculating stats for {k}"):
+            num_samples = min(500, self.__len__())
+            for i in tqdm(range(num_samples), total=num_samples, desc=f"Calculating stats for {k}"):
                 sample = self.__getitem__(i)
                 arr.append(sample[k])
             
             arr = torch.stack(arr, dim=0)
-            stats[k] = {"mean": torch.mean(arr, dim=0), "std": torch.std(arr, dim=0)}
+
+            if k == "meta":
+                stats[k] = {"mean": torch.mean(arr, dim=0), "std": torch.std(arr, dim=0)}
+            else:
+                stats[k] = {"mean": torch.mean(arr), "std": torch.std(arr)}
 
         return stats
 
@@ -811,10 +848,10 @@ class TransitDataModule(L.LightningDataModule):
         else:
             output_stats = None
 
-        self.train_dataset = TransitDataset(train_processor, planets_gt, meta, output_stats=output_stats)
+        self.train_dataset = TransitDataset(train_processor, planets_gt, meta, output_stats=output_stats, augmentations=get_augmentations("train"))
         joblib.dump(self.train_dataset.get_stats(), stats_path)
 
-        self.val_dataset = TransitDataset(test_processor, planets_gt, meta, output_stats=self.train_dataset.get_stats())
+        self.val_dataset = TransitDataset(test_processor, planets_gt, meta, output_stats=self.train_dataset.get_stats(), augmentations=get_augmentations("val"))
 
 
     def train_dataloader(self) -> torch.utils.data.DataLoader:

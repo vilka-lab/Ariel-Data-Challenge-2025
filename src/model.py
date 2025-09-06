@@ -1,7 +1,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+# from pytorch3dunet.unet3d.model import UNet3D
+# from segmentation_models_pytorch import Unet
 import timm
+
 
 class MeanTower(nn.Module):
     def __init__(self):
@@ -89,54 +92,57 @@ class ConvBlock(nn.Module):
 class TransitTower(nn.Module):
     def __init__(self):
         super().__init__()
-        self.weights = nn.Sequential(
-            nn.Conv2d(1, 4, kernel_size=(5, 5), padding="same"),
+        # self.weights = nn.Sequential(
+        #     nn.Conv2d(1, 4, kernel_size=(5, 5), padding="same"),
 
-            HorizontalZip(4, 8),
-            # ConvBlock(8),
+        #     HorizontalZip(4, 8),
+        #     # ConvBlock(8),
 
-            VerticalZip(8, 16),
-            # ConvBlock(16),
+        #     VerticalZip(8, 16),
+        #     # ConvBlock(16),
 
-            HorizontalZip(16, 32),
-            # ConvBlock(32),
+        #     HorizontalZip(16, 32),
+        #     # ConvBlock(32),
 
-            VerticalZip(32, 64),
-            # ConvBlock(64),
+        #     VerticalZip(32, 64),
+        #     # ConvBlock(64),
 
-            HorizontalZip(64, 128),
-            # ConvBlock(128),
+        #     HorizontalZip(64, 128),
+        #     # ConvBlock(128),
 
-            # ConvBlock(128),
-            # ConvBlock(128),
+        #     # ConvBlock(128),
+        #     # ConvBlock(128),
 
-            VerticalZip(128, 128),
-            HorizontalZip(128, 128),
+        #     VerticalZip(128, 128),
+        #     HorizontalZip(128, 128),
             
-            # ConvBlock(128),
-            # ConvBlock(128),
+        #     # ConvBlock(128),
+        #     # ConvBlock(128),
 
-            VerticalZip(128, 128),
-            HorizontalZip(128, 128),
+        #     VerticalZip(128, 128),
+        #     HorizontalZip(128, 128),
             
-            # ConvBlock(128),
-            # ConvBlock(128),
+        #     # ConvBlock(128),
+        #     # ConvBlock(128),
 
-            nn.Flatten(),
-            nn.Linear(11264, 283*2),
-        )
+        #     nn.Flatten(),
+        #     nn.SiLU(),
+        #     nn.Linear(11264, 1024),
+        # )
+        self.weights = timm.create_model('vit_base_patch32_224.sam_in1k', pretrained=True, in_chans=1, img_size=(375, 318))
+        self.weights.head = nn.Identity()
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.weights(x)
     
 
 class UncertaintyModel(nn.Module):
-    def __init__(self, hidden_dim: int = 256):
+    def __init__(self, hidden_dim: int = 256, num_features: int = 768):
         super().__init__()
         self.weights = nn.Sequential(
-            nn.BatchNorm1d(7 + 283),
+            nn.BatchNorm1d(7 + num_features),
             nn.Dropout(0.2),
-            nn.Linear(7 + 283, hidden_dim),
+            nn.Linear(7 + num_features, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, 283)
         )
@@ -148,21 +154,39 @@ class UncertaintyModel(nn.Module):
 class TransitModel(nn.Module):
     def __init__(self):
         super().__init__()
-        self.mean_tower = MeanTower()
+        # self.mean_tower = MeanTower()
         self.transit_tower = TransitTower()
-        self.unc_model = UncertaintyModel()
-        # self.static_coef = nn.Parameter(torch.tensor(0.5, dtype=torch.float32, requires_grad=True))
+        num_features = 768
+
+        self.unc_model = UncertaintyModel(num_features=num_features)
+        self.linear = nn.Linear(num_features + 7, 283)
+        # self.gate = nn.Sequential(
+        #     nn.Linear(7 + num_features + 1, 1),
+        #     nn.Sigmoid()
+        # )
 
 
     def forward(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
-        mean = self.mean_tower(x["white_curve"])
-        transit = self.transit_tower(x["transit_map"])
-        spectre = mean + transit[:, :283] 
-
-        unc_input = torch.cat([transit[:, 283:], x["meta"]], dim=1)
-        unc_out = self.unc_model(unc_input)
+        features = self.transit_tower(x["transit_map"])
         
-        # spectre = spectre + x["static_component"] * self.static_coef
-        out = torch.cat([spectre, unc_out], dim=1)
+        transit = self.linear(torch.cat([features, x["meta"]], dim=1))
+        
+        unc_input = torch.cat([features, x["meta"]], dim=1)
+        unc_out = self.unc_model(unc_input)
+
+        # gate = self.gate(torch.cat([features, x["meta"], x["static_component"]], dim=1)) * 2
+        # transit = transit + gate * x["static_component"]
+        
+        out = torch.cat([transit, unc_out], dim=1)
         return out
     
+    def freeze_backbone(self):
+        models = [self.transit_tower, self.linear]
+        
+        for model in models:
+            for param in model.parameters():
+                param.requires_grad = False
+
+    def freeze_uncertainty(self):
+        for param in self.unc_model.parameters():
+            param.requires_grad = False

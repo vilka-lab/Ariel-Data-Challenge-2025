@@ -1,4 +1,5 @@
 seed: 42
+gauss_loss: False
 
 data_module:
   data_path: ariel-data-challenge-2025
@@ -6,7 +7,7 @@ data_module:
   num_workers: 0
   test_size: 0.1
   full_train: False
-  fold: 4
+  fold: 0
 
 fabric:
   devices: auto
@@ -15,12 +16,10 @@ fabric:
   precision: 32
 
 model:
-  airs_output_features: 128
-  fgs_output_features: 32
-  meta_output_features: 32
+  checkpoint: null
 
 optimizer:
-  lr: 0.001
+  lr: 0.0001
   weight_decay: 0.01
   betas: [0.9, 0.999]
   # momentum: 0.9

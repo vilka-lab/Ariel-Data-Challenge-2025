@@ -9,3 +9,6 @@ data_old
 *.png
 packages
 *.joblib
+simulation
+*.csv
+*.h5
