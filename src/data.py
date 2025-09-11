@@ -10,15 +10,13 @@ from astropy.stats import sigma_clip
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import joblib
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 import lightning as L
 import torch
-from sklearn.model_selection import train_test_split
 from scipy.signal import savgol_filter
 from scipy.optimize import minimize
 from sklearn.model_selection import KFold
 from src.augmentations import get_augmentations, AugmentationList
-import copy
 
 
 sensor_sizes_dict = {
@@ -475,12 +473,12 @@ class SensorData:
 
         if self.sensor == "AIRS-CH0":
             mean = star.mean(axis=(0, 1))
-            std = star.std(axis=(0, 1))
+            # std = star.std(axis=(0, 1))
         else:
             mean = star.mean()
-            std = star.std()
+            # std = star.std()
 
-        self.signal = np.clip((self.signal - mean) / std, -1.0, 3.5)
+        self.signal = self.signal / mean
 
 class TransitData:
     def __init__(self, path: Path, planet_id: int, transit_num: int, axis_info: pd.DataFrame) -> None:
@@ -675,7 +673,7 @@ class TransitDataset(Dataset):
         return signal.mean(axis=1)
     
     def _get_transit_map(self, signal: np.ndarray) -> np.ndarray:
-        return signal
+        return signal.astype(np.float32)
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         if index not in self.cache:
@@ -714,9 +712,11 @@ class TransitDataset(Dataset):
             "transit_map": cached_output["transit_map"].copy(),
             "meta": cached_output["meta"].clone(),
             "planet_id": cached_output["planet_id"],
-            "targets": cached_output.get("targets"),
             "static_component": cached_output["static_component"].clone(),
         }
+
+        if "targets" in cached_output:
+            output["targets"] = cached_output["targets"].clone()
         
         if not self.precalc:
             output["transit_map"] = torch.from_numpy(
@@ -740,6 +740,7 @@ class TransitDataset(Dataset):
         for k in output:
             if k in ["planet_id", "start", "end", "samples"]:
                 continue
+
             
             if self.output_stats is not None:
                 mean = self.output_stats[k]["mean"]

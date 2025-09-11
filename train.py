@@ -131,7 +131,7 @@ def main(config: dict) -> float:
 
     train_loader, val_loader = make_dataloaders(config, fabric)
 
-    model = TransitModel()
+    model = TransitModel(pretrained=True)
     if config["model"]["checkpoint"] is not None:
         model.load_state_dict(torch.load(config["model"]["checkpoint"]))
         fabric.print(f"Loaded model from {config['model']['checkpoint']}")
@@ -154,7 +154,7 @@ def main(config: dict) -> float:
         # model.freeze_backbone()
     else:
         train_criterion = CustomLoss(coef=0.9)
-        val_criterion = CustomLoss(coef=1.0)
+        val_criterion = CustomLoss(coef=0.0)
 
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     fabric.print(f"Number of trainable parameters: {num_params / 1e6:.4f}M")
@@ -205,18 +205,18 @@ if __name__ == "__main__":
     config = read_yaml("config.yaml")
     
     losses = []
-    for fold in range(1):
+    for fold in range(5):
         print(f"Fold {fold}")
         config["data_module"]["fold"] = fold
         config["gauss_loss"] = False
 
-        main(config)
+        loss_val = main(config)
 
         # config["gauss_loss"] = True
         # config["model"]["checkpoint"] = f"best_model_{fold}.pth"
         
         # loss_val = main(config)
-        # losses.append(loss_val)
+        losses.append(loss_val)
 
     print(f"Losses: {losses}")
     print(f"Mean loss: {np.mean(losses):.4f}")

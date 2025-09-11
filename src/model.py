@@ -1,42 +1,33 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-# from pytorch3dunet.unet3d.model import UNet3D
-# from segmentation_models_pytorch import Unet
 import timm
 
 
 class MeanTower(nn.Module):
-    def __init__(self):
+    def __init__(self, num_groups: int):
         super().__init__()
         self.weights = nn.Sequential(
-            nn.Conv1d(1, 32, kernel_size=3),
+            nn.Conv1d(1*num_groups, 2*num_groups, kernel_size=3, groups=num_groups, padding='same'),
             nn.ReLU(),
             nn.MaxPool1d(2),
-            nn.BatchNorm1d(32),
+            nn.BatchNorm1d(2*num_groups),
 
-            nn.Conv1d(32, 64, kernel_size=3),
+            nn.Conv1d(2*num_groups, 4*num_groups, kernel_size=3, groups=num_groups, padding='same'),
             nn.ReLU(),
             nn.MaxPool1d(2),
             
-            nn.Conv1d(64, 128, kernel_size=3),
+            nn.Conv1d(4*num_groups, 8*num_groups, kernel_size=3, groups=num_groups, padding='same'),
             nn.ReLU(),
             nn.MaxPool1d(2),
 
-            nn.Conv1d(128, 256, kernel_size=3),
+            nn.Conv1d(8*num_groups, 16*num_groups, kernel_size=3, padding='same'),
             nn.ReLU(),
             nn.MaxPool1d(2),
             nn.Flatten(),
 
-            nn.Linear(2304, 500),
-            nn.ReLU(),
             nn.Dropout(0.2),
-
-            nn.Linear(500, 100),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-
-            nn.Linear(100, 1)
+            nn.Linear(368 * num_groups, num_groups),
+            nn.ReLU()
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -90,46 +81,9 @@ class ConvBlock(nn.Module):
     
 
 class TransitTower(nn.Module):
-    def __init__(self):
+    def __init__(self, pretrained: bool = False):
         super().__init__()
-        # self.weights = nn.Sequential(
-        #     nn.Conv2d(1, 4, kernel_size=(5, 5), padding="same"),
-
-        #     HorizontalZip(4, 8),
-        #     # ConvBlock(8),
-
-        #     VerticalZip(8, 16),
-        #     # ConvBlock(16),
-
-        #     HorizontalZip(16, 32),
-        #     # ConvBlock(32),
-
-        #     VerticalZip(32, 64),
-        #     # ConvBlock(64),
-
-        #     HorizontalZip(64, 128),
-        #     # ConvBlock(128),
-
-        #     # ConvBlock(128),
-        #     # ConvBlock(128),
-
-        #     VerticalZip(128, 128),
-        #     HorizontalZip(128, 128),
-            
-        #     # ConvBlock(128),
-        #     # ConvBlock(128),
-
-        #     VerticalZip(128, 128),
-        #     HorizontalZip(128, 128),
-            
-        #     # ConvBlock(128),
-        #     # ConvBlock(128),
-
-        #     nn.Flatten(),
-        #     nn.SiLU(),
-        #     nn.Linear(11264, 1024),
-        # )
-        self.weights = timm.create_model('vit_base_patch32_224.sam_in1k', pretrained=True, in_chans=1, img_size=(375, 318))
+        self.weights = timm.create_model('vit_base_patch32_224.sam_in1k', pretrained=pretrained, in_chans=1, img_size=(375, 318))
         self.weights.head = nn.Identity()
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -152,18 +106,19 @@ class UncertaintyModel(nn.Module):
     
 
 class TransitModel(nn.Module):
-    def __init__(self):
+    def __init__(self, pretrained: bool = False):
         super().__init__()
         # self.mean_tower = MeanTower()
-        self.transit_tower = TransitTower()
+        self.transit_tower = TransitTower(pretrained=pretrained)
+        # self.mean_tower = MeanTower(num_groups=318)
         num_features = 768
 
         self.unc_model = UncertaintyModel(num_features=num_features)
         self.linear = nn.Linear(num_features + 7, 283)
-        # self.gate = nn.Sequential(
-        #     nn.Linear(7 + num_features + 1, 1),
-        #     nn.Sigmoid()
-        # )
+        self.gate = nn.Sequential(
+            nn.Linear(7 + num_features + 1, 1),
+            nn.Sigmoid()
+        )
 
 
     def forward(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
@@ -174,8 +129,8 @@ class TransitModel(nn.Module):
         unc_input = torch.cat([features, x["meta"]], dim=1)
         unc_out = self.unc_model(unc_input)
 
-        # gate = self.gate(torch.cat([features, x["meta"], x["static_component"]], dim=1)) * 2
-        # transit = transit + gate * x["static_component"]
+        gate = self.gate(torch.cat([features, x["meta"], x["static_component"]], dim=1)) * 2
+        transit = transit + gate * x["static_component"]
         
         out = torch.cat([transit, unc_out], dim=1)
         return out
