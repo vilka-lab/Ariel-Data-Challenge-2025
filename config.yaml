@@ -13,7 +13,7 @@ fabric:
   devices: auto
   accelerator: cuda
   strategy: auto
-  precision: 32
+  precision: 16-mixed
 
 model:
   checkpoint: null

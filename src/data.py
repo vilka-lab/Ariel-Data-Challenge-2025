@@ -467,18 +467,6 @@ class SensorData:
         
         return left_st, left_en, right_st, right_en
 
-    def normalize(self) -> None:
-        left, _, _, right = self._get_edges()
-        star = np.concatenate([self.signal[:left], self.signal[right:]])
-
-        if self.sensor == "AIRS-CH0":
-            mean = star.mean(axis=(0, 1))
-            # std = star.std(axis=(0, 1))
-        else:
-            mean = star.mean()
-            # std = star.std()
-
-        self.signal = self.signal / mean
 
 class TransitData:
     def __init__(self, path: Path, planet_id: int, transit_num: int, axis_info: pd.DataFrame) -> None:
@@ -525,9 +513,44 @@ class TransitData:
         self.static_component = model.predict_static(pdata)
         # self.spectre = model.predict_spectre(pdata)
 
-    def normalize(self) -> None:
-        self.airs.normalize()
-        self.fgs.normalize()
+    def get_map(self, channel_wise_normalization: bool = True) -> np.ndarray:
+        left, _, _, right = self.airs._get_edges()
+
+        airs = np.nan_to_num(self.airs.signal).astype(np.float32)[:, :, 39:].mean(axis=1)
+        fgs = np.nan_to_num(self.fgs.signal).astype(np.float32).mean(axis=(1, 2))
+        signal = np.concatenate([airs, fgs[:, None]], axis=1)
+        
+        star = np.concatenate([signal[:left], signal[right:]])
+
+        if channel_wise_normalization:
+            mean = star.mean(axis=0)[None, :]
+        else:
+            mean = star.mean()
+
+        signal = signal / mean
+        return signal
+
+    # def get_map(self, channel_wise_normalization: bool = True) -> np.ndarray:
+    #     left, _, _, right = self.airs._get_edges()
+
+    #     airs = np.nan_to_num(self.airs.signal).astype(np.float32)
+    #     fgs = np.nan_to_num(self.fgs.signal).astype(np.float32)
+    #     l = airs.shape[0]
+
+    #     signal = np.concatenate([
+    #         airs[:, 14:18, 29:].reshape(l*4, 327),
+    #         fgs[:, 14:18, 14:18].reshape(l*4, 4)
+    #     ], axis=-1)
+        
+    #     star = np.concatenate([signal[:left], signal[right:]])
+
+    #     if channel_wise_normalization:
+    #         mean = star.mean(axis=0)[None, :]
+    #     else:
+    #         mean = star.mean()
+
+    #     signal = signal / mean
+    #     return signal
         
 
 class DataProcessor:
@@ -650,11 +673,11 @@ class TransitDataset(Dataset):
         res = []
         for col in META_COLUMNS:
             val = self.meta[planet_id][col]
+            mean, std = META_STATS[col]
+            val = (val - mean) / std
 
             if len(self.augmentations) > 0 and random.random() < 0.5:
-                mean, std = META_STATS[col]
-                val += np.random.randn() * std * 0.1
-                val = np.clip(val, mean - 3*std, mean + 3*std)
+                val += np.random.randn() * std * 0.01
 
             res.append(val)
 
@@ -672,17 +695,21 @@ class TransitDataset(Dataset):
     def _get_white_curve(self, signal: np.ndarray) -> np.ndarray:
         return signal.mean(axis=1)
     
-    def _get_transit_map(self, signal: np.ndarray) -> np.ndarray:
-        return signal.astype(np.float32)
+    def _get_transit_map(self, obj: TransitData) -> np.ndarray:
+        # return np.clip(obj.get_map(channel_wise_normalization=True), None, 1.5)[None, ...]
+        return obj.get_map(channel_wise_normalization=True)[None, ...]
+    
+    def _add_meta_layer(self, transit_map: np.ndarray, meta: np.ndarray) -> np.ndarray:
+        meta_layer = np.zeros_like(transit_map)
+        feature_width = int(meta_layer.shape[-1] / meta.shape[0])
+        for i in range(meta.shape[0]):
+            meta_layer[0, :, i*feature_width:(i+1)*feature_width] = meta[i]
+
+        return np.concatenate([transit_map, meta_layer], axis=0)
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         if index not in self.cache:
             obj = self.data_processor[index]
-            obj.normalize()
-            
-            airs = np.nan_to_num(obj.airs.signal).astype(np.float32)[:, :, self.cut_inf:].mean(axis=1)
-            fgs = np.nan_to_num(obj.fgs.signal).astype(np.float32).mean(axis=(1, 2))
-            signal = np.concatenate([airs, fgs[:, None]], axis=1)
             planet_id = int(obj.planet_id)
 
             if self.gt is not None:
@@ -691,12 +718,15 @@ class TransitDataset(Dataset):
                 targets = None
 
             # white_curve = self._get_white_curve(signal)
-            transit_map = self._get_transit_map(signal)
+            transit_map = self._get_transit_map(obj)
+
+            meta = self._meta_process(planet_id)
+            # transit_map = self._add_meta_layer(transit_map, meta)
 
             output = {
                 # "white_curve": white_curve[None, :],
-                "transit_map": transit_map[None, :],
-                "meta": torch.from_numpy(self._meta_process(planet_id)),
+                "transit_map": transit_map,
+                "meta": torch.from_numpy(meta),
                 "planet_id": str(planet_id),
                 "static_component": torch.from_numpy(np.array([obj.static_component]).astype(np.float32)),
                 # "spectre": savgol_filter(obj.spectre.astype(np.float32), 18, 2)
@@ -741,10 +771,10 @@ class TransitDataset(Dataset):
             if k in ["planet_id", "start", "end", "samples"]:
                 continue
 
-            
             if self.output_stats is not None:
                 mean = self.output_stats[k]["mean"]
                 std = self.output_stats[k]["std"]
+
                 output[k] = (output[k] - mean) / std
             
         return output
@@ -764,11 +794,14 @@ class TransitDataset(Dataset):
                 arr.append(sample[k])
             
             arr = torch.stack(arr, dim=0)
-
-            if k == "meta":
-                stats[k] = {"mean": torch.mean(arr, dim=0), "std": torch.std(arr, dim=0)}
-            else:
+            
+            if k == "transit_map":
+                stats[k] = {"mean": torch.mean(arr, dim=(0, 2, 3))[:, None, None], "std": torch.std(arr, dim=(0, 2, 3))[:, None, None]}
+            elif k in ["static_component", "targets"]:
                 stats[k] = {"mean": torch.mean(arr), "std": torch.std(arr)}
+            elif k == "meta":
+                stats[k] = {"mean": torch.mean(arr, dim=0), "std": torch.std(arr, dim=0)}
+            
 
         return stats
 

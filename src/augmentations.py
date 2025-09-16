@@ -8,14 +8,15 @@ class AbstractAugmentation:
 
     def __call__(self, img: np.ndarray):
         if random.random() < self.p:
-            img = self.augment(img)
+            for i in range(img.shape[0]):
+                img[i] = self.augment(img[i])
         
         return img
     
 
 class VerticalFlip(AbstractAugmentation):
     def augment(self, img: np.ndarray) -> np.ndarray:
-        return img[:, ::-1, ...].copy()
+        return img[::-1, ...].copy()
     
 
 class GaussianNoise(AbstractAugmentation):
@@ -33,13 +34,13 @@ class EmptyVerticalLines(AbstractAugmentation):
         self.num_lines = num_lines
 
     def augment(self, img: np.ndarray) -> np.ndarray:
-        _, _, w = img.shape
+        _, w = img.shape
 
         num_lines = random.randint(1, self.num_lines)
         values = np.random.choice([0, img.max()], size=num_lines)
 
         lines = random.sample(range(w), num_lines)
-        img[:, :, lines] = values[None, None, :]
+        img[:, lines] = values[None, :]
         return img
     
 class EmptyHorizontalLines(AbstractAugmentation):
@@ -48,13 +49,13 @@ class EmptyHorizontalLines(AbstractAugmentation):
         self.num_lines = num_lines
 
     def augment(self, img: np.ndarray) -> np.ndarray:
-        _, h, _ = img.shape
+        h, _ = img.shape
 
         num_lines = random.randint(1, self.num_lines)
         values = np.random.choice([0, img.max()], size=num_lines)
 
         lines = random.sample(range(h), num_lines)
-        img[:, lines, :] = values[None, :, None]
+        img[lines, :] = values[:, None]
         return img
     
 

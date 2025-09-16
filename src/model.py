@@ -94,9 +94,9 @@ class UncertaintyModel(nn.Module):
     def __init__(self, hidden_dim: int = 256, num_features: int = 768):
         super().__init__()
         self.weights = nn.Sequential(
-            nn.BatchNorm1d(7 + num_features),
+            nn.BatchNorm1d(num_features),
             nn.Dropout(0.2),
-            nn.Linear(7 + num_features, hidden_dim),
+            nn.Linear(num_features, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, 283)
         )
@@ -113,8 +113,10 @@ class TransitModel(nn.Module):
         # self.mean_tower = MeanTower(num_groups=318)
         num_features = 768
 
-        self.unc_model = UncertaintyModel(num_features=num_features)
+        self.unc_model = UncertaintyModel(num_features=num_features + 7)
         self.linear = nn.Linear(num_features + 7, 283)
+        # self.linear = UncertaintyModel(num_features=num_features + 7)
+
         self.gate = nn.Sequential(
             nn.Linear(7 + num_features + 1, 1),
             nn.Sigmoid()
