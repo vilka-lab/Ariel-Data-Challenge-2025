@@ -14,6 +14,7 @@ from torch.utils.data import Dataset
 import lightning as L
 import torch
 from scipy.signal import savgol_filter
+from scipy import signal
 from scipy.optimize import minimize
 from sklearn.model_selection import KFold
 from src.augmentations import get_augmentations, AugmentationList
@@ -144,26 +145,26 @@ class StaticModel:
         
         return error
 
-    def predict_spectre(self, single_preprocessed_signal) -> np.ndarray:
-        output = []
-        for i in range(single_preprocessed_signal.shape[-1]):
-            signal_1d = single_preprocessed_signal[:, i]
-            signal_1d = savgol_filter(signal_1d, 30, 2)
+    # def predict_spectre(self, single_preprocessed_signal) -> np.ndarray:
+    #     output = []
+    #     for i in range(single_preprocessed_signal.shape[-1]):
+    #         signal_1d = single_preprocessed_signal[:, i]
+    #         signal_1d = savgol_filter(signal_1d, 30, 2)
             
-            phase1, phase2 = self._phase_detector(signal_1d)
+    #         phase1, phase2 = self._phase_detector(signal_1d)
 
-            phase1 = max(self.cfg.MODEL_OPTIMIZATION_DELTA, phase1)
-            phase2 = min(len(signal_1d) - self.cfg.MODEL_OPTIMIZATION_DELTA - 1, phase2)    
-
-            result = minimize(
-                fun=self._objective_function,
-                x0=[0.0001],
-                args=(signal_1d, phase1, phase2),
-                method="Nelder-Mead"
-            )
-            output.append(np.clip(result.x[0], 0.0, None))
+    #         phase1 = max(self.cfg.MODEL_OPTIMIZATION_DELTA, phase1)
+    #         phase2 = min(len(signal_1d) - self.cfg.MODEL_OPTIMIZATION_DELTA - 1, phase2)    
+            
+    #         result = minimize(
+    #             fun=self._objective_function,
+    #             x0=[0.0001],
+    #             args=(signal_1d, phase1, phase2),
+    #             method="Nelder-Mead"
+    #         )
+    #         output.append(np.clip(result.x[0], 0.0, None))
         
-        return np.array(output[::-1])
+    #     return np.array(output[::-1])
     
     def predict_static(self, single_preprocessed_signal) -> float:
         signal_1d = single_preprocessed_signal[:, :-1].mean(axis=1)
@@ -359,7 +360,21 @@ class SensorData:
             self.signal[t] = np.where(nan_mask, filled_frame, frame)
         
         self.interpolated = True
-        
+
+    def low_pass_filter(self) -> None:
+        s = self.signal
+        new_signal = s.copy()
+
+        if self.sensor == "AIRS-CH0":
+            b, a = signal.butter(4, 0.1, "low", analog=False)
+        else:
+            b, a = signal.butter(4, 0.01, "low", analog=False)
+
+        for i in range(s.shape[1]):
+            for j in range(s.shape[2]):
+                new_signal[:, i, j] = signal.filtfilt(b, a, s[:, i, j])
+
+        self.signal = new_signal
 
     def process(self) -> None:
         self.apply_adc_convert()
@@ -370,17 +385,18 @@ class SensorData:
         # self.apply_clean_read()
 
         self.apply_cds()
-
+        
         if self.sensor == "AIRS-CH0":
             self.find_edges()
         else:
             self.set_edges(None)
         
         self.bin_obs(self.bin_coef)
+        # self.low_pass_filter()
 
         # self.apply_correct_flat_field()
         # self.fill_nans_with_interpolation()
-        self.fill_nan()
+        # self.fill_nan()
 
     def bin_obs(self, binning: int) -> None:
         if self.binned:
@@ -394,6 +410,9 @@ class SensorData:
         self.signal = cds_binned.transpose(0,1,3,2)[0]
 
         for k, v in self.edges.items():
+            if k == "noncomplete":
+                continue
+
             self.edges[k] = v // binning if v else None
         self.binned = True
 
@@ -428,6 +447,16 @@ class SensorData:
         ax.set_title(f"Light curve for planet {self.planet_id} {self.sensor}")
         return fig
     
+    def set_noncomplete(self) -> None:
+        if self.edges["t1a"] is None or self.edges["t1b"] is None or self.edges["t2a"] is None or self.edges["t2b"] is None:
+            self.edges["noncomplete"] = True
+
+        elif len(set(self.edges.values())) != 6:
+            self.edges["noncomplete"] = True
+        
+        else:
+            self.edges["noncomplete"] = False 
+    
     def find_edges(self) -> None:
         light_curve = np.nan_to_num(self.signal).sum(axis=(1,2))
         light_curve = light_curve / light_curve.mean()
@@ -443,6 +472,17 @@ class SensorData:
             "t2a": t2a,
             "t2b": t2b
         }
+        self.set_noncomplete()
+
+        left_edge = self.edges["t1a"] or self.edges["transit_start"] or self.edges["t1b"]
+        right_edge = self.edges["t2b"] or self.edges["transit_end"] or self.edges["t2a"]
+
+        self.edges["t1a"] = self.edges["t1a"] or left_edge
+        self.edges["t1b"] = self.edges["t1b"] or left_edge
+        self.edges["t2a"] = self.edges["t2a"] or right_edge
+        self.edges["t2b"] = self.edges["t2b"] or right_edge
+        self.edges["transit_start"] = self.edges["transit_start"] or left_edge
+        self.edges["transit_end"] = self.edges["transit_end"] or right_edge
 
     def set_edges(self, edges: dict | None) -> None:
         if edges:
@@ -454,7 +494,8 @@ class SensorData:
                 "t1a": None,
                 "t1b": None,
                 "t2a": None,
-                "t2b": None
+                "t2b": None,
+                "noncomplete": True
             }
 
     def _get_edges(self) -> tuple[int, int, int, int]:
@@ -493,6 +534,9 @@ class TransitData:
         edges = edges.copy()
         
         for k, v in edges.items():
+            if k == "noncomplete":
+                continue
+
             if v:
                 edges[k] = int(v * coef)
         return edges
@@ -656,25 +700,13 @@ class TransitDataset(Dataset):
     def __len__(self) -> int:
         return len(self.data_processor)
     
-    def _process(self, a: np.ndarray, sensor: str) -> np.ndarray:
-        diff = torch.from_numpy(np.nan_to_num(a))
-        mean, std = STATS[sensor]
-        diff = (diff - mean) / std
-        return diff.to(torch.float32)
-    
-    def _signal_process(self, signal: np.ndarray, sensor: str, indices: list[np.ndarray]) -> np.ndarray:
-        output = []
-        for ix in indices:
-            output.append(torch.stack([self._process(signal[i], sensor) for i in ix]))
-
-        return torch.stack(output)
     
     def _meta_process(self, planet_id: int) -> np.ndarray:
         res = []
         for col in META_COLUMNS:
             val = self.meta[planet_id][col]
             mean, std = META_STATS[col]
-            val = (val - mean) / std
+            # val = (val - mean) / std
 
             if len(self.augmentations) > 0 and random.random() < 0.5:
                 val += np.random.randn() * std * 0.01
@@ -706,6 +738,25 @@ class TransitDataset(Dataset):
             meta_layer[0, :, i*feature_width:(i+1)*feature_width] = meta[i]
 
         return np.concatenate([transit_map, meta_layer], axis=0)
+    
+    def _add_edges(self, meta: np.ndarray, obj: TransitData) -> np.ndarray:
+        values = []
+
+        keys = ["transit_start", "transit_end", "t1a", "t1b", "t2a", "t2b", "noncomplete"]
+        for k in keys:
+            v = obj.airs.edges[k]
+
+            if k != "noncomplete":
+                if v is None:
+                    v = -1
+                else:
+                    v = v / obj.airs.signal.shape[0]
+            
+            values.append(v)
+
+        values = np.array(values).astype(np.float32)
+        meta = np.concatenate([meta, values], axis=0)
+        return meta
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         if index not in self.cache:
@@ -721,6 +772,7 @@ class TransitDataset(Dataset):
             transit_map = self._get_transit_map(obj)
 
             meta = self._meta_process(planet_id)
+            meta = self._add_edges(meta, obj)
             # transit_map = self._add_meta_layer(transit_map, meta)
 
             output = {
@@ -835,15 +887,15 @@ class TransitDataModule(L.LightningDataModule):
         self.fold = fold
 
         self.planets_stop_list = [
-            "926530491",
-            "905997089",
-            "1124834224",
-            "806204363",
-            "158006264",
-            "158006264",
-            "561423413",
-            "1843015807",
-            "1338107575"
+            # "926530491",
+            # "905997089",
+            # "1124834224",
+            # "806204363",
+            # "158006264",
+            # "158006264",
+            # "561423413",
+            # "1843015807",
+            # "1338107575"
         ]
 
 

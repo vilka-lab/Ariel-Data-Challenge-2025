@@ -113,18 +113,20 @@ class TransitModel(nn.Module):
         # self.mean_tower = MeanTower(num_groups=318)
         num_features = 768
 
-        self.unc_model = UncertaintyModel(num_features=num_features + 7)
-        self.linear = nn.Linear(num_features + 7, 283)
+        self.unc_model = UncertaintyModel(num_features=num_features + 14)
+        self.linear = nn.Linear(num_features + 14, 283)
         # self.linear = UncertaintyModel(num_features=num_features + 7)
 
         self.gate = nn.Sequential(
-            nn.Linear(7 + num_features + 1, 1),
+            nn.Linear(14 + num_features + 1, 1),
             nn.Sigmoid()
         )
 
+    def get_features(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
+        return self.transit_tower(x["transit_map"])
 
     def forward(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
-        features = self.transit_tower(x["transit_map"])
+        features = self.get_features(x)
         
         transit = self.linear(torch.cat([features, x["meta"]], dim=1))
         
