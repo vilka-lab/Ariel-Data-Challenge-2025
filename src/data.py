@@ -167,7 +167,7 @@ class StaticModel:
     #     return np.array(output[::-1])
     
     def predict_static(self, single_preprocessed_signal) -> float:
-        signal_1d = single_preprocessed_signal[:, :-1].mean(axis=1)
+        signal_1d = single_preprocessed_signal.mean(axis=1)
         signal_1d = savgol_filter(signal_1d, 30, 2)
         
         phase1, phase2 = self._phase_detector(signal_1d)
@@ -554,7 +554,10 @@ class TransitData:
             fgs.mean(axis=1)[:, None],
         ], axis=1)
 
-        self.static_component = model.predict_static(pdata)
+        self.static_component = np.array([
+            model.predict_static(pdata[:, -1][:, None]),
+            model.predict_static(pdata[:, :-1])
+        ])
         # self.spectre = model.predict_spectre(pdata)
 
     def get_map(self, channel_wise_normalization: bool = True) -> np.ndarray:
@@ -728,8 +731,11 @@ class TransitDataset(Dataset):
         return signal.mean(axis=1)
     
     def _get_transit_map(self, obj: TransitData) -> np.ndarray:
-        # return np.clip(obj.get_map(channel_wise_normalization=True), None, 1.5)[None, ...]
-        return obj.get_map(channel_wise_normalization=True)[None, ...]
+        return np.clip(obj.get_map(channel_wise_normalization=True), None, 1.5)[None, ...]
+        # tmap = obj.get_map(channel_wise_normalization=True).astype(np.float32)
+        # zero_tmap = np.zeros((1, 384, 320), dtype=np.float32)
+        # zero_tmap[0, :tmap.shape[0], :tmap.shape[1]] = tmap
+        # return zero_tmap
     
     def _add_meta_layer(self, transit_map: np.ndarray, meta: np.ndarray) -> np.ndarray:
         meta_layer = np.zeros_like(transit_map)
@@ -780,7 +786,7 @@ class TransitDataset(Dataset):
                 "transit_map": transit_map,
                 "meta": torch.from_numpy(meta),
                 "planet_id": str(planet_id),
-                "static_component": torch.from_numpy(np.array([obj.static_component]).astype(np.float32)),
+                "static_component": torch.from_numpy(obj.static_component.astype(np.float32)),
                 # "spectre": savgol_filter(obj.spectre.astype(np.float32), 18, 2)
             }
 
@@ -902,14 +908,8 @@ class TransitDataModule(L.LightningDataModule):
     def setup(self, stage: str | None = None, load_stats: bool = False) -> None:
         planets = sorted(list((self.data_path / "train").glob("*")))
 
-        # if not self.full_train:
-        #     train_planets, test_planets = train_test_split(
-        #         planets, test_size=self.test_size, random_state=self.random_state
-        #     )
-        # else:
-        #     train_planets, test_planets = planets, planets
 
-        kfold = KFold(n_splits=5, shuffle=True, random_state=self.random_state)
+        kfold = KFold(n_splits=10, shuffle=True, random_state=self.random_state)
         train_indices, test_indices = list(kfold.split(planets))[self.fold]
         train_planets = [planets[i] for i in train_indices]
         test_planets = [planets[i] for i in test_indices]

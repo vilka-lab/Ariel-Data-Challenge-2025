@@ -113,28 +113,35 @@ class TransitModel(nn.Module):
         # self.mean_tower = MeanTower(num_groups=318)
         num_features = 768
 
-        self.unc_model = UncertaintyModel(num_features=num_features + 14)
-        self.linear = nn.Linear(num_features + 14, 283)
-        # self.linear = UncertaintyModel(num_features=num_features + 7)
+        self.unc_model = UncertaintyModel(num_features=num_features + 14 + 2)
+        self.linear = nn.Linear(num_features + 14 + 2, 283)
+        # self.linear = UncertaintyModel(num_features=num_features + 14 + 2, hidden_dim=512)
 
         self.gate = nn.Sequential(
-            nn.Linear(14 + num_features + 1, 1),
+            nn.Linear(14 + num_features + 2, 2),
             nn.Sigmoid()
         )
+        self.stamp = nn.Linear(14 + 2, 16*16)
 
     def get_features(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
         return self.transit_tower(x["transit_map"])
 
     def forward(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
+        stamp = self.stamp(torch.cat([x["meta"], x["static_component"]], dim=1)).reshape(x["transit_map"].shape[0], 16, 16)
+        x["transit_map"][:, 0, :16, :16] = x["transit_map"][:, 0, :16, :16] + stamp
+
         features = self.get_features(x)
         
-        transit = self.linear(torch.cat([features, x["meta"]], dim=1))
+        transit = self.linear(torch.cat([features, x["meta"], x["static_component"]], dim=1))
         
-        unc_input = torch.cat([features, x["meta"]], dim=1)
+        unc_input = torch.cat([features, x["meta"], x["static_component"]], dim=1)
         unc_out = self.unc_model(unc_input)
 
         gate = self.gate(torch.cat([features, x["meta"], x["static_component"]], dim=1)) * 2
-        transit = transit + gate * x["static_component"]
+        static = gate * x["static_component"]
+        # transit = transit + gate * x["static_component"]
+        transit[:, 0] = transit[:, 0] + static[:, 0]
+        transit[:, 1:] = transit[:, 1:] + static[:, 1].unsqueeze(1)
         
         out = torch.cat([transit, unc_out], dim=1)
         return out

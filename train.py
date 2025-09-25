@@ -205,17 +205,13 @@ if __name__ == "__main__":
     config = read_yaml("config.yaml")
     
     losses = []
-    for fold in range(5):
+    for fold in range(10):
         print(f"Fold {fold}")
         config["data_module"]["fold"] = fold
         config["gauss_loss"] = False
 
         loss_val = main(config)
 
-        # config["gauss_loss"] = True
-        # config["model"]["checkpoint"] = f"best_model_{fold}.pth"
-        
-        # loss_val = main(config)
         losses.append(loss_val)
 
     print(f"Losses: {losses}")
